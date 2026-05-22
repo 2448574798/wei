@@ -1,0 +1,13 @@
+2026-05-21 14:26:14,985 - ERROR - 处理失败: call_model() missing 1 required positional argument: 'config'
+2026-05-21 14:26:23,263 - ERROR - 处理失败: call_model() missing 1 required positional argument: 'config'
+2026-05-21 14:26:53,784 - ERROR - 处理失败: call_model() missing 1 required positional argument: 'config'
+2026-05-21 14:27:34,515 - ERROR - 处理失败: call_model() missing 1 required positional argument: 'config'
+2026-05-21 14:27:50,381 - ERROR - 处理失败: call_model() missing 1 required positional argument: 'config'
+2026-05-21 14:28:22,713 - ERROR - 处理失败: call_model() missing 1 required positional argument: 'config'
+2026-05-21 14:28:32,599 - ERROR - 处理失败: call_model() missing 1 required positional argument: 'config'
+2026-05-21 14:36:51,432 - ERROR - 处理失败: call_model() missing 1 required positional argument: 'config'
+2026-05-21 14:37:57,601 - ERROR - 处理失败: 'SystemMessage' object has no attribute 'get'
+2026-05-21 14:38:51,760 - ERROR - 处理失败: call_model() missing 1 required positional argument: 'config'
+2026-05-21 15:13:20,686 - ERROR - 处理失败: Error code: 401 - {'error': {'message': '该令牌额度已用尽 (request id: 2026052115132067853694874845989)', 'type': 'one_api_error'}}
+2026-05-21 15:14:26,459 - ERROR - 处理失败: Error code: 401 - {'error': {'message': '令牌 wei-OpenAI（#1）额度已用尽 (request id: 2026052115142645658254728689320)', 'type': 'one_api_error'}}
+2026-05-21 15:14:37,211 - ERROR - 处理失败: Error code: 401 - {'error': {'message': '令牌 wei-OpenAI（#1）额度已用尽 (request id: 2026052115143721003419546514966)', 'type': 'one_api_error'}}
