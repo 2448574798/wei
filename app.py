@@ -1,3 +1,5 @@
+from gevent import monkey
+monkey.patch_all()
 import os
 import json
 import re
@@ -13,7 +15,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import ToolNode
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
-from tools import web_search, fetch_webpage
+from tools import web_search, fetch_webpage, send_email
 
 app = Flask(__name__)
 CORS(app)
@@ -86,12 +88,13 @@ def call_model(state: MessagesState, config=None):
         openai_api_key=ONE_API_TOKEN,
         openai_api_base=ONE_API_URL,
     )
-    llm_with_tools = llm.bind_tools([web_search, fetch_webpage])
+    llm_with_tools = llm.bind_tools([web_search, fetch_webpage, send_email])
     
     # 强制系统提示
     system_msg = SystemMessage(
         content=(
             "你是一个智能助手，可以使用 web_search 和 fetch_webpage 工具获取实时信息。"
+            "也可以使用 send_email 帮助用户发送邮件。"
             "回答必须准确。**严禁输出任何 URL 链接**，包括 http、https、www 等形式。"
             "如果搜索结果中有链接，不要显示。"
         )
@@ -111,7 +114,7 @@ def should_continue(state: MessagesState):
 # ---------- 构建工作流 ----------
 workflow = StateGraph(MessagesState)
 workflow.add_node("agent", call_model)
-workflow.add_node("tools", ToolNode([web_search, fetch_webpage]))
+workflow.add_node("tools", ToolNode([web_search, fetch_webpage, send_email]))
 workflow.set_entry_point("agent")
 workflow.add_conditional_edges("agent", should_continue, {"tools": "tools", "__end__": "__end__"})
 workflow.add_edge("tools", "agent")
@@ -174,4 +177,4 @@ def chat():
         return jsonify({"error": "服务器内部错误，请稍后再试"}), 500
 
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=5000)
+    app.run(host='127.0.0.1', port=8000)

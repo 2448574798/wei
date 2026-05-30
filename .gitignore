@@ -6,3 +6,11 @@ searxng-data/
 app.log
 flask.log
 *.bak
+.env
+*.log
+__pycache__/
+*.pyc
+/tmp/
+*_bak.py
+*.log
+.env

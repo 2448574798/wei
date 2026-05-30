@@ -41,3 +41,53 @@ def fetch_webpage(url: str) -> str:
         return text
     except Exception as e:
         return f"抓取失败: {str(e)}"
+
+import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from langchain_core.tools import tool
+
+# ---------- 邮件配置 ----------
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.qq.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+DEFAULT_FROM = os.getenv("SMTP_FROM", SMTP_USER)
+
+@tool
+def send_email(to: str, subject: str, body: str) -> str:
+    """
+    发送一封电子邮件。
+    
+    参数:
+    - to: 收件人邮箱地址（例如 "user@example.com"）
+    - subject: 邮件主题
+    - body: 邮件正文（纯文本）
+    
+    返回:
+    - 成功时返回 "邮件已发送至 xxx"
+    - 失败时返回错误信息
+    """
+    if not SMTP_USER or not SMTP_PASSWORD:
+        return "邮件服务未配置：请设置 SMTP_USER 和 SMTP_PASSWORD 环境变量。"
+
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = DEFAULT_FROM
+        msg["To"] = to
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+
+        if SMTP_PORT == 465:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
+                server.login(SMTP_USER, SMTP_PASSWORD)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+                server.starttls()
+                server.login(SMTP_USER, SMTP_PASSWORD)
+                server.send_message(msg)
+        return f"邮件已发送至 {to}"
+    except Exception as e:
+        return f"邮件发送失败: {str(e)}"
