@@ -1,5 +1,6 @@
 from gevent import monkey
 monkey.patch_all()
+
 import os
 import json
 import re
@@ -43,9 +44,30 @@ if not ONE_API_TOKEN:
     app.logger.error("ONE_API_TOKEN 环境变量未设置")
     raise RuntimeError("环境变量 ONE_API_TOKEN 未设置")
 
-# ---------- 消息格式转换函数 ----------
+# ---------- 全局缓存 ----------
+_llm_cache = {}
+
+def get_llm(model_name: str):
+    key = (model_name, ONE_API_URL, 0.2)
+    if key not in _llm_cache:
+        _llm_cache[key] = ChatOpenAI(
+            model=model_name,
+            temperature=0.2,
+            openai_api_key=ONE_API_TOKEN,
+            openai_api_base=ONE_API_URL,
+        )
+    return _llm_cache[key]
+
+# ---------- 系统提示词（启动时加载）----------
+SYSTEM_PROMPT_TEXT = "你是一个智能助手。"
+try:
+    with open('/opt/wei/config/system_prompt.txt', 'r', encoding='utf-8') as f:
+        SYSTEM_PROMPT_TEXT = f.read()
+except FileNotFoundError:
+    pass
+
+# ---------- 消息格式转换 ----------
 def convert_to_langchain(messages):
-    """将前端 OpenAI 格式消息转为 LangChain 消息对象"""
     langchain_msgs = []
     for msg in messages:
         role = msg.get("role")
@@ -60,20 +82,6 @@ def convert_to_langchain(messages):
             langchain_msgs.append(ToolMessage(content=content, tool_call_id=msg.get("tool_call_id", "")))
     return langchain_msgs
 
-def convert_from_langchain(langchain_msg):
-    """将单个 LangChain 消息转为前端 OpenAI 格式"""
-    if isinstance(langchain_msg, SystemMessage):
-        return {"role": "system", "content": langchain_msg.content}
-    elif isinstance(langchain_msg, HumanMessage):
-        return {"role": "user", "content": langchain_msg.content}
-    elif isinstance(langchain_msg, AIMessage):
-        return {"role": "assistant", "content": langchain_msg.content}
-    elif isinstance(langchain_msg, ToolMessage):
-        return {"role": "tool", "content": langchain_msg.content, "tool_call_id": langchain_msg.tool_call_id}
-    else:
-        return {"role": "assistant", "content": str(langchain_msg)}
-
-# ---------- 后处理：删除 URL ----------
 def remove_urls(text):
     return re.sub(r'https?://\S+', '', text)
 
@@ -82,23 +90,9 @@ def call_model(state: MessagesState, config=None):
     model_name = "gpt-5.4"
     if config and "configurable" in config:
         model_name = config["configurable"].get("model", model_name)
-    llm = ChatOpenAI(
-        model=model_name,
-        temperature=0.2,
-        openai_api_key=ONE_API_TOKEN,
-        openai_api_base=ONE_API_URL,
-    )
+    llm = get_llm(model_name)
     llm_with_tools = llm.bind_tools([web_search, fetch_webpage, send_email])
-    
-    # 强制系统提示
-    prompt_file = '/opt/wei/config/system_prompt.txt'
-    try:
-        with open(prompt_file, 'r', encoding='utf-8') as f:
-            system_prompt_text = f.read()
-    except FileNotFoundError:
-        system_prompt_text = "你是一个智能助手。"  # 默认值
-
-    system_msg = SystemMessage(content=system_prompt_text)
+    system_msg = SystemMessage(content=SYSTEM_PROMPT_TEXT)
     messages = state["messages"]
     if not messages or not isinstance(messages[0], SystemMessage):
         messages = [system_msg] + messages
@@ -111,63 +105,50 @@ def should_continue(state: MessagesState):
         return "tools"
     return "__end__"
 
-# ---------- 构建工作流 ----------
+# ---------- 工作流 ----------
 workflow = StateGraph(MessagesState)
 workflow.add_node("agent", call_model)
 workflow.add_node("tools", ToolNode([web_search, fetch_webpage, send_email]))
 workflow.set_entry_point("agent")
 workflow.add_conditional_edges("agent", should_continue, {"tools": "tools", "__end__": "__end__"})
 workflow.add_edge("tools", "agent")
-
 checkpointer = MemorySaver()
 graph = workflow.compile(checkpointer=checkpointer)
 
-# ---------- Flask 路由 ----------
+# ---------- 路由 ----------
 @app.route('/api/chat', methods=['POST'])
-@limiter.limit("10 per minute")   # 每 IP 每分钟最多 10 次请求
+@limiter.limit("10 per minute")
 def chat():
-    # 1. 安全获取 JSON
     data = request.get_json(silent=True)
     if not data:
         app.logger.warning("收到空请求或无效 JSON")
         return jsonify({"error": "无效的请求数据"}), 400
-
-    # 2. 输入校验
     messages = data.get('messages', [])
     if not messages:
         return jsonify({"error": "消息不能为空"}), 400
-    # 限制消息条数（防止滥用）
     if len(messages) > 50:
         return jsonify({"error": "消息条数过多，最多支持 50 条"}), 400
-    # 限制每条消息长度（例如 2000 字符）
     for msg in messages:
         if len(msg.get('content', '')) > 2000:
             return jsonify({"error": "单条消息内容过长，最多 2000 字符"}), 400
-
-    # 3. thread_id 处理：若前端未传，生成新 ID 并返回
     thread_id = data.get('thread_id')
     if not thread_id:
         thread_id = str(uuid.uuid4())
         new_thread = True
     else:
         new_thread = False
-
     model = data.get('model', 'gpt-5.4')
     config = {"configurable": {"thread_id": thread_id, "model": model}}
-
-    # 4. 转换前端消息为 LangChain 格式
     try:
         langchain_messages = convert_to_langchain(messages)
     except Exception as e:
         app.logger.exception("消息格式转换失败")
         return jsonify({"error": "消息格式错误"}), 400
-
     try:
         result = graph.invoke({"messages": langchain_messages}, config=config)
         final_message = result["messages"][-1]
         reply = final_message.content if hasattr(final_message, "content") else str(final_message)
-        reply = remove_urls(reply)   # 后处理删除 URL
-        # 5. 返回结果，同时返回 thread_id（用于前端记忆）
+        reply = remove_urls(reply)
         response_data = {"reply": reply, "thread_id": thread_id}
         if new_thread:
             response_data["new_thread"] = True
