@@ -1,6 +1,10 @@
 import requests
 from bs4 import BeautifulSoup
 import re
+import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 SEARXNG_URL = "http://localhost:8888"
 
@@ -18,10 +22,11 @@ def web_search(query: str) -> str:
 
     results = []
     for r in data.get("results", [])[:5]:
-        results.append(
-            f"标题: {r['title']}\n链接: {r['url']}\n摘要: {r.get('content', '')}"
-        )
-    return "\n\n".join(results)
+        title = r.get("title", "无标题")
+        url = r.get("url", "")
+        content = r.get("content", "")
+        results.append(f"标题: {title}\n链接: {url}\n摘要: {content}")
+    return "\n\n".join(results) if results else "未找到相关结果。"
 
 def fetch_webpage(url: str) -> str:
     """抓取网页文本内容（最多3000字符）"""
@@ -42,12 +47,6 @@ def fetch_webpage(url: str) -> str:
     except Exception as e:
         return f"抓取失败: {str(e)}"
 
-import os
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from langchain_core.tools import tool
-
 # ---------- 邮件配置 ----------
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.qq.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
@@ -55,20 +54,8 @@ SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 DEFAULT_FROM = os.getenv("SMTP_FROM", SMTP_USER)
 
-@tool
 def send_email(to: str, subject: str, body: str) -> str:
-    """
-    发送一封电子邮件。
-    
-    参数:
-    - to: 收件人邮箱地址（例如 "user@example.com"）
-    - subject: 邮件主题
-    - body: 邮件正文（纯文本）
-    
-    返回:
-    - 成功时返回 "邮件已发送至 xxx"
-    - 失败时返回错误信息
-    """
+    """发送邮件。参数：to（收件人邮箱）、subject（主题）、body（正文）。"""
     if not SMTP_USER or not SMTP_PASSWORD:
         return "邮件服务未配置：请设置 SMTP_USER 和 SMTP_PASSWORD 环境变量。"
 
