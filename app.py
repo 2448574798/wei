@@ -91,14 +91,14 @@ def call_model(state: MessagesState, config=None):
     llm_with_tools = llm.bind_tools([web_search, fetch_webpage, send_email])
     
     # 强制系统提示
-    system_msg = SystemMessage(
-        content=(
-            "你是一个智能助手，可以使用 web_search 和 fetch_webpage 工具获取实时信息。"
-            "也可以使用 send_email 帮助用户发送邮件。"
-            "回答必须准确。**严禁输出任何 URL 链接**，包括 http、https、www 等形式。"
-            "如果搜索结果中有链接，不要显示。"
-        )
-    )
+    prompt_file = '/opt/wei/config/system_prompt.txt'
+    try:
+        with open(prompt_file, 'r', encoding='utf-8') as f:
+            system_prompt_text = f.read()
+    except FileNotFoundError:
+        system_prompt_text = "你是一个智能助手。"  # 默认值
+
+    system_msg = SystemMessage(content=system_prompt_text)
     messages = state["messages"]
     if not messages or not isinstance(messages[0], SystemMessage):
         messages = [system_msg] + messages
