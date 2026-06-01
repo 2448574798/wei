@@ -363,7 +363,7 @@ function addMessage(role, content, options = {}) {
             return wrapper;
         }
 
-        function addLoadingMessage(label = "思考中") {
+        function addLoadingMessage(label = "正在思考") {
             const wrapper = document.createElement("div");
             wrapper.className = "message assistant";
             wrapper.dataset.loading = "true";
@@ -393,6 +393,29 @@ function addMessage(role, content, options = {}) {
             if (labelEl) {
                 labelEl.textContent = label;
             }
+        }
+
+        function startLoadingStageRotation(wrapper) {
+            const stages = [
+                { label: "正在规划", status: "正在规划..." },
+                { label: "正在思考", status: "正在思考..." },
+                { label: "正在整理回答", status: "正在整理回答..." },
+            ];
+
+            let index = 0;
+            updateLoadingMessage(wrapper, stages[0].label);
+            setStatus(stages[0].status, "ok");
+
+            const timer = window.setInterval(() => {
+                index = Math.min(index + 1, stages.length - 1);
+                updateLoadingMessage(wrapper, stages[index].label);
+                setStatus(stages[index].status, "ok");
+                if (index >= stages.length - 1) {
+                    window.clearInterval(timer);
+                }
+            }, 900);
+
+            return () => window.clearInterval(timer);
         }
 
         function persistState() {
@@ -435,13 +458,12 @@ function addMessage(role, content, options = {}) {
 
             isSending = true;
             sendBtnEl.disabled = true;
-            setStatus("正在规划...");
-
             promptEl.value = "";
             resizeInput();
             addMessage("user", userMessage);
 
             const loadingEl = addLoadingMessage("正在规划");
+            const stopLoadingStages = startLoadingStageRotation(loadingEl);
 
             try {
                 const payload = {
@@ -478,10 +500,13 @@ function addMessage(role, content, options = {}) {
                 const route = data.planner_decision?.route;
                 if (route === "research") {
                     updateLoadingMessage(loadingEl, "正在思考");
+                    setStatus("正在思考...", "ok");
                 } else {
                     updateLoadingMessage(loadingEl, "正在整理回答");
+                    setStatus("正在整理回答...", "ok");
                 }
 
+                stopLoadingStages();
                 loadingEl.remove();
 
                 addMessage("assistant", data.reply || "无回复", { meta });
@@ -492,6 +517,7 @@ function addMessage(role, content, options = {}) {
                     .join(" · ");
                 setStatus(statusSuffix ? `回答完成 · ${statusSuffix}` : "回答完成");
             } catch (error) {
+                stopLoadingStages();
                 loadingEl.remove();
                 const message = `请求失败：${error.message}`;
                 addMessage("assistant", message);
