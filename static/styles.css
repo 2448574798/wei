@@ -507,7 +507,6 @@
             padding: 12px 14px;
     font-size: 13px;
     font-weight: 700;
-    text-align: center;
 }
 
         .trace-card summary::-webkit-details-marker {
@@ -520,11 +519,28 @@
         }
 
         .trace-labels {
-             display: flex;
+             display: grid;
+             grid-template-columns: auto 1fr auto;
              align-items: center;
-             justify-content: center;
              gap: 8px;
              min-width: 0;
+             width: 100%;
+        }
+
+        .trace-labels > .trace-tag {
+            justify-self: start;
+        }
+
+        .trace-labels > span:last-child:not(.trace-tag) {
+            text-align: center;
+            justify-self: center;
+            min-width: 0;
+        }
+
+        .trace-labels::after {
+            content: "";
+            width: 1px;
+            visibility: hidden;
         }
 
         .trace-tag {
