@@ -448,17 +448,21 @@
 }
 
 .message[data-loading="true"] .bubble {
-    display: flex;
+    display: inline-flex;
     align-items: center;
-    min-height: calc(1em * 1.62 + 16px);
+    justify-content: center;
+    min-width: 80px;
+    min-height: auto;
 }
 
 .loading-bubble {
-    display: flex;
+    display: inline-flex;
     align-items: center;
+    justify-content: center;
     font-size: inherit;
     line-height: inherit;
     gap: 8px;
+    min-height: calc(1em * 1.62);
 }
 
 .message-meta {
@@ -501,7 +505,6 @@
             list-style: none;
             cursor: pointer;
             display: block;
-            position: relative;
             padding: 12px 14px;
     font-size: 13px;
     font-weight: 700;
@@ -516,46 +519,31 @@
             background: var(--primary-soft);
         }
 
-        .trace-labels {
-             display: flex;
-             align-items: center;
-             justify-content: flex-start;
-             gap: 8px;
-             min-width: 0;
-             width: 100%;
+        .trace-header {
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            min-height: 20px;
+            width: 100%;
         }
 
-        .trace-labels > .trace-tag {
-            flex: 0 0 auto;
+        .trace-header-left {
+            display: inline-flex;
+            align-items: center;
+            justify-content: flex-start;
+            min-width: 0;
         }
 
-        .trace-labels > span:last-child:not(.trace-tag) {
-            visibility: hidden;
-            width: 0;
-            overflow: hidden;
-            white-space: nowrap;
-        }
-
-        .trace-labels::after {
-            content: none;
-        }
-
-        .planner-card summary::after,
-        .tool-trace-card summary::after {
+        .trace-header-title {
             position: absolute;
             left: 50%;
             top: 50%;
             transform: translate(-50%, -50%);
-            pointer-events: none;
+            text-align: center;
             color: var(--text-main);
-        }
-
-        .planner-card summary::after {
-            content: "规划决策";
-        }
-
-        .tool-trace-card summary::after {
-            content: "工具轨迹";
+            pointer-events: none;
+            white-space: nowrap;
         }
 
         .trace-tag {
