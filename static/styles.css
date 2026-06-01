@@ -501,6 +501,7 @@
             list-style: none;
             cursor: pointer;
             display: block;
+            position: relative;
             padding: 12px 14px;
     font-size: 13px;
     font-weight: 700;
@@ -516,29 +517,45 @@
         }
 
         .trace-labels {
-             display: grid;
-             grid-template-columns: auto 1fr auto;
+             display: flex;
              align-items: center;
-             column-gap: 8px;
+             justify-content: flex-start;
+             gap: 8px;
              min-width: 0;
              width: 100%;
         }
 
         .trace-labels > .trace-tag {
-            justify-self: start;
+            flex: 0 0 auto;
         }
 
         .trace-labels > span:last-child:not(.trace-tag) {
-            text-align: center;
-            justify-self: center;
-            min-width: 0;
-            width: 100%;
+            visibility: hidden;
+            width: 0;
+            overflow: hidden;
+            white-space: nowrap;
         }
 
         .trace-labels::after {
-            content: "";
-            width: 1px;
-            visibility: hidden;
+            content: none;
+        }
+
+        .planner-card summary::after,
+        .tool-trace-card summary::after {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            color: var(--text-main);
+        }
+
+        .planner-card summary::after {
+            content: "规划决策";
+        }
+
+        .tool-trace-card summary::after {
+            content: "工具轨迹";
         }
 
         .trace-tag {

@@ -194,7 +194,7 @@ const messagesEl = document.getElementById("messages");
             if (meta.plannerDecision) {
                 const planner = meta.plannerDecision;
                 const card = document.createElement("details");
-                card.className = "trace-card";
+                card.className = "trace-card planner-card";
 
                 const summary = document.createElement("summary");
                 summary.innerHTML = `
@@ -243,7 +243,7 @@ const messagesEl = document.getElementById("messages");
 
             if (meta.toolTrace?.length) {
                 const card = document.createElement("details");
-                card.className = "trace-card";
+                card.className = "trace-card tool-trace-card";
 
                 const summary = document.createElement("summary");
                 summary.innerHTML = `
