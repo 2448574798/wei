@@ -343,15 +343,16 @@
             white-space: nowrap;
         }
 
-        .messages {
-            min-height: 0;
-            overflow-y: auto;
-            padding: 20px 20px 10px;
-            display: flex;
-            flex-direction: column;
-            gap: 18px;
-            scroll-behavior: smooth;
-        }
+.messages {
+    min-height: 0;
+    overflow-y: auto;
+    padding: 20px 20px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    scroll-behavior: smooth;
+    scrollbar-gutter: stable both-edges;
+}
 
         .empty {
             margin: auto;
@@ -501,11 +502,12 @@
             cursor: pointer;
             display: flex;
             align-items: center;
-            justify-content: space-between;
-            gap: 12px;
+            justify-content: center;
+            gap: 10px;
             padding: 12px 14px;
     font-size: 13px;
     font-weight: 700;
+    text-align: center;
 }
 
         .trace-card summary::-webkit-details-marker {
@@ -518,10 +520,11 @@
         }
 
         .trace-labels {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            min-width: 0;
+             display: flex;
+             align-items: center;
+             justify-content: center;
+             gap: 8px;
+             min-width: 0;
         }
 
         .trace-tag {

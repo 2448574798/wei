@@ -202,7 +202,6 @@ const messagesEl = document.getElementById("messages");
                         <span class="trace-tag route-${escapeHtml(planner.route || "unknown")}">${escapeHtml(plannerLabel(planner.route))}</span>
                         <span>规划决策</span>
                     </div>
-                    <span>${escapeHtml(answerModeLabel(planner.answer_mode))}</span>
                 `;
 
                 const content = document.createElement("div");
@@ -252,7 +251,6 @@ const messagesEl = document.getElementById("messages");
                         <span class="trace-tag trace">${meta.toolTrace.length}</span>
                         <span>工具轨迹</span>
                     </div>
-                    <span>展开查看</span>
                 `;
 
                 const content = document.createElement("div");
