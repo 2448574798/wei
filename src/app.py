@@ -522,9 +522,9 @@ async def online_research_node(state: AgentState, config=None):
     answer = call_online_research_model(user_text, query, model_name)
     trace_entry = {
         "tool": "online_research",
-        "content": trim_text(
-            f"联网思考模型：{model_name}\n搜索焦点：{query}\n状态：已完成联网思考并生成回答",
-            400,
+        "content": format_trace_content(
+            f"联网思考模型：{model_name}\n搜索焦点：{query}",
+            answer,
         ),
     }
     return {
