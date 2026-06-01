@@ -18,3 +18,4 @@ __pycache__/
 logs/
 ssh_tunnel*.log
 uvicorn_local*.log
+*.bak
