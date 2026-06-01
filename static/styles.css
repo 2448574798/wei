@@ -187,8 +187,8 @@
         .model-trigger {
             width: 320px;
             min-width: 320px;
-            height: 58px;
-            min-height: 58px;
+            height: 74px;
+            min-height: 74px;
             border-radius: 22px;
             border: 1px solid rgba(37, 99, 235, 0.14);
             background:
@@ -226,7 +226,7 @@
             min-width: 0;
             display: grid;
             grid-template-rows: auto 1fr 1fr;
-            gap: 3px;
+            gap: 2px;
             text-align: left;
             align-content: center;
         }
@@ -824,8 +824,8 @@
             .model-trigger {
                 width: 100%;
                 min-width: 0;
-                height: 58px;
-                min-height: 58px;
+                height: 74px;
+                min-height: 74px;
             }
 
             .model-menu {
