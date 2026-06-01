@@ -327,14 +327,14 @@ function addMessage(role, content, options = {}) {
             const bubble = document.createElement("div");
             bubble.className = "bubble";
             bubble.innerHTML = `
-                <span class="loading-bubble">
+                <p class="loading-bubble">
                     <span>思考中</span>
                     <span class="dots">
                         <span class="dot"></span>
                         <span class="dot"></span>
                         <span class="dot"></span>
                     </span>
-                </span>
+                </p>
             `;
 
             wrapper.appendChild(bubble);
