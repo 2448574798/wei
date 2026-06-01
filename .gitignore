@@ -1,21 +1,29 @@
+# environment
+.env
 venv/
 .venv/
+
+# python
 __pycache__/
 *.pyc
-searxng-data/
-*.log
-app.log
-flask.log
-*.bak
-.env
-*.log
-__pycache__/
-*.pyc
-/tmp/
-*_bak.py
-*.log
-.env
+
+# logs
 logs/
+*.log
 ssh_tunnel*.log
 uvicorn_local*.log
+
+# backups / temp
 *.bak
+*.bak.*
+*_bak.py
+*.tmp
+/tmp/
+
+# local runtime data
+searxng-data/
+
+# editor / os
+.vscode/
+.idea/
+.DS_Store
