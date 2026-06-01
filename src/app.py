@@ -374,6 +374,12 @@ def clean_online_research_output(text: str) -> str:
     return cleaned.strip()
 
 
+def public_planner_decision(decision: dict | None) -> dict:
+    data = dict(decision or {})
+    data.pop("search_query", None)
+    return data
+
+
 def call_online_research_model(user_text: str, search_query: str, model_name: str) -> str:
     if not ONE_API_TOKEN:
         raise RuntimeError("ONE_API_TOKEN is not configured.")
@@ -681,7 +687,7 @@ async def chat(request: Request):
         response = {
             "reply": reply,
             "thread_id": thread_id,
-            "planner_decision": result.get("planner_decision", {}),
+            "planner_decision": public_planner_decision(result.get("planner_decision", {})),
         }
         if include_tool_trace:
             response["tool_trace"] = (result.get("tool_trace") or []) + build_tool_trace(result["messages"])

@@ -275,10 +275,6 @@
                         <strong>原因</strong>
                         <div>${escapeHtml(planner.reason || "-")}</div>
                     </div>
-                    <div class="kv">
-                        <strong>搜索词</strong>
-                        <pre class="trace-pre">${escapeHtml(planner.search_query || "-")}</pre>
-                    </div>
                 `;
 
                 card.append(summary, content);
@@ -530,7 +526,7 @@ function addMessage(role, content, options = {}) {
         }
 
         function clearConversation() {
-            if (!window.confirm("确定要清空当前会话吗？这会开始一个新的会话线程。")) {
+            if (!window.confirm("这会开始一个新的会话，同时清空当前会话")) {
                 return;
             }
 
@@ -545,7 +541,7 @@ function addMessage(role, content, options = {}) {
             });
 
             updateEmptyState();
-            setStatus("已清空会话，新的会话线程已就绪");
+            setStatus("新的会话已就绪");
         }
 
         sendBtnEl.addEventListener("click", sendMessage);
