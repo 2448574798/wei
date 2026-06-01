@@ -446,9 +446,18 @@
     border-bottom-left-radius: 8px;
 }
 
+.message[data-loading="true"] .bubble {
+    display: inline-flex;
+    align-items: center;
+}
+
 .loading-bubble {
+    display: inline-flex;
+    align-items: center;
+    min-height: calc(1em * 1.62);
     font-size: inherit;
-    line-height: inherit;
+    line-height: 1;
+    gap: 8px;
 }
 
 .message-meta {
@@ -664,18 +673,14 @@
             background: var(--success);
         }
 
-        .loading-bubble {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-        }
-
         .dots {
             display: inline-flex;
+            align-items: center;
             gap: 4px;
         }
 
         .dot {
+            display: block;
             width: 6px;
             height: 6px;
             border-radius: 50%;

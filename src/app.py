@@ -204,6 +204,41 @@ def likely_needs_research(user_text: str) -> bool:
     return should_force_research(user_text) or bool(SEARCH_ACTION_PATTERN.search(user_text))
 
 
+def localize_planner_reason(reason: str, route: str, user_text: str, post_actions: list[str] | None = None) -> str:
+    text = (reason or "").strip()
+    post_actions = post_actions or []
+
+    if not text:
+        if route == "research":
+            return "用户请求涉及时效性或需要联网核实的信息。"
+        if route == "agent":
+            return "用户请求更适合直接进入常规执行流程。"
+        return "已根据当前请求选择执行路径。"
+
+    lowered = text.lower()
+
+    if "heuristic fallback route" in lowered:
+        return "模型规划不可用，已使用本地规则选择执行路径。"
+    if "matched time-sensitive heuristic" in lowered:
+        return "命中了时效性规则，因此优先走调研路径。"
+    if "research is required before completing follow-up actions" in lowered:
+        return "需要先完成调研，再继续执行后续动作。"
+    if "time-sensitive" in lowered or "current" in lowered or "latest" in lowered or "recent" in lowered:
+        return "用户请求涉及时效性或最新信息，适合先调研再回答。"
+    if "stable knowledge" in lowered or "does not require current information" in lowered:
+        return "用户请求更偏稳定知识，不需要先联网调研。"
+    if "email" in lowered and post_actions:
+        return "需要先整理信息，再继续执行邮件等后续动作。"
+    if "search" in lowered and route == "research":
+        return "这个请求需要先搜索和核实资料。"
+
+    if route == "research":
+        return "已判断这个请求更适合先调研，再基于结果回答。"
+    if route == "agent":
+        return "已判断这个请求可以直接进入常规执行流程。"
+    return text
+
+
 def normalize_planner_decision(decision: PlannerDecision | dict, user_text: str) -> dict:
     data = decision.model_dump() if isinstance(decision, PlannerDecision) else dict(decision)
     forced_research = should_force_research(user_text)
@@ -223,6 +258,7 @@ def normalize_planner_decision(decision: PlannerDecision | dict, user_text: str)
             f"{data.get('reason', '').strip()} Research is required before completing follow-up actions."
         ).strip()
         data["search_query"] = data.get("search_query") or build_default_search_query(user_text)
+    data["reason"] = localize_planner_reason(data.get("reason", ""), data.get("route", "agent"), user_text, post_actions)
     return data
 
 
@@ -270,8 +306,14 @@ def trim_text(text: str, limit: int) -> str:
 
 
 def build_tool_trace(messages: list) -> list[dict]:
+    last_human_index = -1
+    for index, message in enumerate(messages):
+        if isinstance(message, HumanMessage):
+            last_human_index = index
+
     trace = []
-    for message in messages:
+    scoped_messages = messages[last_human_index + 1 :] if last_human_index >= 0 else messages
+    for message in scoped_messages:
         if isinstance(message, ToolMessage):
             trace.append(
                 {
@@ -355,7 +397,7 @@ async def planner_node(state: AgentState, config=None):
                 "Choose route='agent' for stable knowledge, simple writing tasks, or cases where normal tool-calling can continue.\n"
                 "If the user asks to email/search/report after gathering current information, set post_actions=['send_email'] when email sending remains after research.\n"
                 "For research, provide a concrete search query and set answer_mode='grounded_summary'.\n"
-                "Keep reasons short."
+                "Keep reasons short and write the reason in Chinese."
             )
         ),
         HumanMessage(
