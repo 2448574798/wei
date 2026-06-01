@@ -43,14 +43,13 @@ EMAIL_ACTION_PATTERN = re.compile(
     r"(发送到|发送给|发到|发给|发送|发邮件|邮件|邮箱|email|mail)",
     re.IGNORECASE,
 )
+EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
 
 
 class PlannerDecision(BaseModel):
     route: Literal["research", "agent"] = Field(default="agent")
     reason: str = Field(default="")
     search_query: str = Field(default="")
-    needs_fetch: bool = Field(default=False)
-    fetch_url: str = Field(default="")
     answer_mode: Literal["grounded_summary", "tool_agent"] = Field(default="tool_agent")
     post_actions: list[Literal["send_email"]] = Field(default_factory=list)
 
@@ -125,18 +124,10 @@ def build_runtime_system_prompt() -> str:
     today = datetime.now().strftime("%Y-%m-%d")
     policy = (
         f"今天日期是 {today}。\n"
-        "如果请求依赖当前、最近、版本、日期、赛程等可能变化的信息，优先依赖工具证据而不是模型记忆。\n"
+        "如果请求依赖当前、最近、版本、日期、赛程等可能变化的信息，优先依据工具证据而不是模型记忆。\n"
         "如果证据不足，请明确说明无法确认。"
     )
     return f"{SYSTEM_PROMPT_TEXT}\n\n{policy}"
-
-
-def has_relative_date(text: str) -> bool:
-    return bool(re.search(r"今天|今日|明天|后天|昨天|昨日|\btoday\b|\btomorrow\b|\byesterday\b", text, re.IGNORECASE))
-
-
-def has_explicit_date(text: str) -> bool:
-    return bool(re.search(r"\d{4}[-/.年]\d{1,2}([-/\.月]\d{1,2})?", text))
 
 
 def format_cn_date(value: datetime) -> str:
@@ -157,17 +148,27 @@ def expand_relative_dates(text: str) -> str:
         (r"\btomorrow\b", (now + timedelta(days=1)).strftime("%Y-%m-%d")),
         (r"\byesterday\b", (now - timedelta(days=1)).strftime("%Y-%m-%d")),
     ]
+
     expanded = text
     for pattern, replacement in replacements:
         expanded = re.sub(pattern, replacement, expanded, flags=re.IGNORECASE)
     return expanded
 
 
+def has_relative_date(text: str) -> bool:
+    return bool(re.search(r"今天|今日|明天|后天|昨天|昨日|\btoday\b|\btomorrow\b|\byesterday\b", text, re.IGNORECASE))
+
+
+def has_explicit_date(text: str) -> bool:
+    return bool(re.search(r"\d{4}[-/.年]\d{1,2}([-/\.月]\d{1,2})?", text))
+
+
 def build_default_search_query(user_text: str) -> str:
     today = datetime.now().strftime("%Y-%m-%d")
     if not user_text:
         return today
-    normalized = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "", user_text)
+
+    normalized = EMAIL_PATTERN.sub("", user_text)
     normalized = EMAIL_ACTION_PATTERN.sub(" ", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     normalized = expand_relative_dates(normalized or user_text)
@@ -186,7 +187,7 @@ def normalize_search_query(query: str, user_text: str) -> str:
 
 
 def extract_email_targets(user_text: str) -> list[str]:
-    return re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", user_text)
+    return EMAIL_PATTERN.findall(user_text)
 
 
 def infer_post_actions(user_text: str) -> list[str]:
@@ -217,7 +218,7 @@ def localize_planner_reason(reason: str, route: str, post_actions: list[str] | N
 
     lowered = text.lower()
     if "time-sensitive" in lowered or "current" in lowered or "latest" in lowered or "recent" in lowered:
-        return "用户请求涉及时效性或最新信息，适合先调研再回答。"
+        return "用户请求涉及时效性或最新信息，适合先思考再回答。"
     if "email" in lowered and post_actions:
         return "需要先整理信息，再继续执行邮件等后续动作。"
     if "search" in lowered and route == "research":
@@ -225,7 +226,7 @@ def localize_planner_reason(reason: str, route: str, post_actions: list[str] | N
     if re.search(r"[\u4e00-\u9fff]", text):
         return text
     if route == "research":
-        return "已判断这个请求更适合先调研，再基于结果回答。"
+        return "已判断这个请求更适合先思考，再基于结果回答。"
     if route == "agent":
         return "已判断这个请求可以直接进入常规执行流程。"
     return text
@@ -233,8 +234,7 @@ def localize_planner_reason(reason: str, route: str, post_actions: list[str] | N
 
 def normalize_planner_decision(decision: PlannerDecision | dict, user_text: str) -> dict:
     data = decision.model_dump() if isinstance(decision, PlannerDecision) else dict(decision)
-    forced_research = is_time_sensitive(user_text)
-    if forced_research:
+    if is_time_sensitive(user_text):
         data["route"] = "research"
         data["answer_mode"] = "grounded_summary"
         data["reason"] = data.get("reason") or "命中了时效性规则。"
@@ -247,11 +247,9 @@ def normalize_planner_decision(decision: PlannerDecision | dict, user_text: str)
     if post_actions and data.get("route") != "research" and likely_needs_research(user_text):
         data["route"] = "research"
         data["answer_mode"] = "grounded_summary"
-        data["reason"] = f"{data.get('reason', '').strip()} 需要先完成调研，再继续执行后续动作。".strip()
+        data["reason"] = f"{data.get('reason', '').strip()} 需要先完成思考，再继续执行后续动作。".strip()
         data["search_query"] = normalize_search_query(data.get("search_query", ""), user_text)
 
-    data["needs_fetch"] = False
-    data["fetch_url"] = ""
     data["reason"] = localize_planner_reason(data.get("reason", ""), data.get("route", "agent"), post_actions)
     return data
 
@@ -263,8 +261,6 @@ def build_heuristic_planner_decision(user_text: str) -> dict:
             "route": route,
             "reason": "本地规则兜底路径。",
             "search_query": build_default_search_query(user_text) if route == "research" else "",
-            "needs_fetch": False,
-            "fetch_url": "",
             "answer_mode": "grounded_summary" if route == "research" else "tool_agent",
             "post_actions": infer_post_actions(user_text),
         },
@@ -372,7 +368,7 @@ def call_online_research_model(user_text: str, search_query: str, model_name: st
         f"{SYSTEM_PROMPT_TEXT}\n\n"
         f"今天日期是 {today}。\n"
         "你是一名支持内置联网搜索的研究助手。\n"
-        "当问题涉及当前、最新、会变化的信息时，请使用模型的联网能力核实后再回答。\n"
+        "当问题涉及当前、最新、会变化的信息时，请先联网核实，再给出结论。\n"
         "请输出简洁中文答案；若证据不足，要明确说明。"
     )
     user_prompt = (
@@ -398,6 +394,7 @@ def call_online_research_model(user_text: str, search_query: str, model_name: st
         "Authorization": f"Bearer {ONE_API_TOKEN}",
         "Content-Type": "application/json",
     }
+
     response = requests.post(endpoint, headers=headers, json=payload, timeout=90)
     if response.status_code >= 400:
         logger.warning(
@@ -411,10 +408,12 @@ def call_online_research_model(user_text: str, search_query: str, model_name: st
     except requests.HTTPError as exc:
         body = response.text[:1000] if response is not None else ""
         raise RuntimeError(f"Online research request failed: HTTP {response.status_code}. {body}") from exc
+
     data = response.json()
     choices = data.get("choices") or []
     if not choices:
         raise RuntimeError("Online research model returned no choices.")
+
     message = choices[0].get("message", {})
     content = message.get("content", "")
     if isinstance(content, list):
@@ -423,6 +422,7 @@ def call_online_research_model(user_text: str, search_query: str, model_name: st
             if isinstance(item, dict) and item.get("type") == "text":
                 parts.append(item.get("text", ""))
         content = "\n".join(part for part in parts if part)
+
     content = (content or "").strip()
     if not content:
         raise RuntimeError("Online research model returned empty content.")
@@ -433,6 +433,7 @@ async def planner_node(state: AgentState, config=None):
     model_name = PLANNER_MODEL
     if config and "configurable" in config and config["configurable"].get("planner_model"):
         model_name = config["configurable"]["planner_model"]
+
     user_text = get_latest_user_text(state["messages"])
     today = datetime.now().strftime("%Y-%m-%d")
 
@@ -447,7 +448,7 @@ async def planner_node(state: AgentState, config=None):
         SystemMessage(
             content=(
                 "你是工作流规划节点，只返回结构化决策。\n"
-                "当请求依赖当前、最新、会变化的信息时，选择 route='research'。\n"
+                "请求依赖当前、最新、会变化的信息时，选择 route='research'。\n"
                 "稳定知识、普通写作、可直接继续工具流程时，选择 route='agent'。\n"
                 "如果选择 research，请给出简洁可用的 search_query。\n"
                 "reason 用中文，保持简短。"
@@ -502,7 +503,7 @@ async def online_research_node(state: AgentState, config=None):
     trace_entry = {
         "tool": "online_research",
         "content": format_trace_content(
-            f"联网研究模型：{model_name}\n搜索焦点：{query}",
+            f"联网思考模型：{model_name}\n搜索焦点：{query}",
             answer,
         ),
     }

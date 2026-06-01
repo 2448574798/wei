@@ -90,7 +90,7 @@
         }
 
         function plannerLabel(route) {
-            if (route === "research") return "调研";
+            if (route === "research") return "思考";
             if (route === "agent") return "执行";
             return "未知";
         }
@@ -169,7 +169,7 @@
                 web_search: "联网搜索",
                 fetch_webpage: "抓取网页",
                 send_email: "发送邮件",
-                online_research: "联网研究",
+                online_research: "联网思考",
             };
             return map[name] || name || "工具";
         }
@@ -363,7 +363,7 @@ function addMessage(role, content, options = {}) {
             return wrapper;
         }
 
-        function addLoadingMessage() {
+        function addLoadingMessage(label = "思考中") {
             const wrapper = document.createElement("div");
             wrapper.className = "message assistant";
             wrapper.dataset.loading = "true";
@@ -372,7 +372,7 @@ function addMessage(role, content, options = {}) {
             bubble.className = "bubble";
             bubble.innerHTML = `
                 <p class="loading-bubble">
-                    <span>思考中</span>
+                    <span class="loading-label">${escapeHtml(label)}</span>
                     <span class="dots">
                         <span class="dot"></span>
                         <span class="dot"></span>
@@ -385,6 +385,14 @@ function addMessage(role, content, options = {}) {
             messagesEl.appendChild(wrapper);
             messagesEl.scrollTop = messagesEl.scrollHeight;
             return wrapper;
+        }
+
+        function updateLoadingMessage(wrapper, label) {
+            if (!wrapper) return;
+            const labelEl = wrapper.querySelector(".loading-label");
+            if (labelEl) {
+                labelEl.textContent = label;
+            }
         }
 
         function persistState() {
@@ -427,13 +435,13 @@ function addMessage(role, content, options = {}) {
 
             isSending = true;
             sendBtnEl.disabled = true;
-            setStatus("正在请求模型...");
+            setStatus("正在规划...");
 
             promptEl.value = "";
             resizeInput();
             addMessage("user", userMessage);
 
-            const loadingEl = addLoadingMessage();
+            const loadingEl = addLoadingMessage("正在规划");
 
             try {
                 const payload = {
@@ -462,16 +470,22 @@ function addMessage(role, content, options = {}) {
                     setThreadId(data.thread_id);
                 }
 
-                loadingEl.remove();
-
                 const meta = {
                     plannerDecision: data.planner_decision || null,
                     toolTrace: data.tool_trace || [],
                 };
 
+                const route = data.planner_decision?.route;
+                if (route === "research") {
+                    updateLoadingMessage(loadingEl, "正在思考");
+                } else {
+                    updateLoadingMessage(loadingEl, "正在整理回答");
+                }
+
+                loadingEl.remove();
+
                 addMessage("assistant", data.reply || "无回复", { meta });
 
-                const route = data.planner_decision?.route;
                 const traceCount = data.tool_trace?.length || 0;
                 const statusSuffix = [route ? `路由：${plannerLabel(route)}` : "", traceCount ? `工具：${traceCount}` : ""]
                     .filter(Boolean)
