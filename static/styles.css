@@ -448,21 +448,24 @@
 }
 
 .message[data-loading="true"] .bubble {
-    display: inline-flex;
+    display: flex;
     align-items: center;
-    justify-content: center;
-    min-width: 80px;
-    min-height: auto;
+    justify-content: flex-start;
 }
 
 .loading-bubble {
     display: inline-flex;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     font-size: inherit;
-    line-height: inherit;
+    line-height: 1.62;
     gap: 8px;
-    min-height: calc(1em * 1.62);
+    min-height: 1.62em;
+}
+
+.loading-bubble > span:first-child {
+    display: inline-block;
+    line-height: 1.62;
 }
 
 .message-meta {
@@ -716,6 +719,7 @@
             display: inline-flex;
             align-items: center;
             gap: 4px;
+            min-height: 1.62em;
         }
 
         .dot {
