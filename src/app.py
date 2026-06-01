@@ -7,6 +7,7 @@ from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,10 +22,11 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from tools import fetch_webpage, send_email, web_search
+from src.tools import fetch_webpage, is_fetch_error, send_email, smtp_is_configured, web_search
 
 
-BASE_DIR = Path(__file__).resolve().parent
+SRC_DIR = Path(__file__).resolve().parent
+BASE_DIR = SRC_DIR.parent
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 TIME_SENSITIVE_PATTERN = re.compile(
     r"(今天|昨日|昨天|明天|现在|当前|目前|最新|最近|刚刚|实时|近况|行情|价格|汇率|股价|新闻|天气|"
@@ -33,6 +35,16 @@ TIME_SENSITIVE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 SEARCH_URL_PATTERN = re.compile(r"^URL:\s*(\S+)$", re.MULTILINE)
+EMAIL_ACTION_PATTERN = re.compile(
+    r"(发送到|发送给|发到|发给|发送|发邮件|邮件|邮箱|email|mail)",
+    re.IGNORECASE,
+)
+SEARCH_ACTION_PATTERN = re.compile(r"(搜索|搜一下|查询|查一下|联网|网页|网站|fetch|search|browse|look up)", re.IGNORECASE)
+NON_FETCH_FRIENDLY_DOMAINS = {
+    "help.openai.com",
+    "support.google.com",
+    "docs.github.com",
+}
 
 
 class PlannerDecision(BaseModel):
@@ -51,12 +63,17 @@ class PlannerDecision(BaseModel):
         default="tool_agent",
         description="How the answer should be produced.",
     )
+    post_actions: list[Literal["send_email"]] = Field(
+        default_factory=list,
+        description="Actions that should happen after grounded research is complete.",
+    )
 
 
 class AgentState(MessagesState):
     planner_decision: dict
     search_result: str
     fetch_result: str
+    tool_trace: list[dict]
 
 
 def load_dotenv(env_path: Path) -> None:
@@ -135,7 +152,10 @@ def build_default_search_query(user_text: str) -> str:
     today = datetime.now().strftime("%Y-%m-%d")
     if not user_text:
         return today
-    return f"{user_text} {today}"
+    normalized = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "", user_text)
+    normalized = EMAIL_ACTION_PATTERN.sub(" ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return f"{normalized or user_text} {today}"
 
 
 def extract_urls(search_result: str) -> list[str]:
@@ -146,11 +166,120 @@ def is_time_sensitive(user_text: str) -> bool:
     return bool(TIME_SENSITIVE_PATTERN.search(user_text))
 
 
-def get_selected_model_name(config) -> str:
-    model_name = "gpt-4o"
+def get_agent_model_name(config) -> str:
+    model_name = AGENT_MODEL
     if config and "configurable" in config:
         model_name = config["configurable"].get("model", model_name)
     return model_name
+
+
+def get_planner_model_name(config) -> str:
+    if config and "configurable" in config and config["configurable"].get("planner_model"):
+        return config["configurable"]["planner_model"]
+    return PLANNER_MODEL
+
+
+def get_grounded_answer_model_name(config) -> str:
+    if config and "configurable" in config and config["configurable"].get("grounded_model"):
+        return config["configurable"]["grounded_model"]
+    return GROUNDED_ANSWER_MODEL or get_agent_model_name(config)
+
+
+def extract_email_targets(user_text: str) -> list[str]:
+    return re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", user_text)
+
+
+def infer_post_actions(user_text: str) -> list[str]:
+    emails = extract_email_targets(user_text)
+    if emails and EMAIL_ACTION_PATTERN.search(user_text):
+        return ["send_email"]
+    return []
+
+
+def should_force_research(user_text: str) -> bool:
+    return bool(user_text and is_time_sensitive(user_text))
+
+
+def likely_needs_research(user_text: str) -> bool:
+    return should_force_research(user_text) or bool(SEARCH_ACTION_PATTERN.search(user_text))
+
+
+def normalize_planner_decision(decision: PlannerDecision | dict, user_text: str) -> dict:
+    data = decision.model_dump() if isinstance(decision, PlannerDecision) else dict(decision)
+    forced_research = should_force_research(user_text)
+    if forced_research:
+        data["route"] = "research"
+        data["answer_mode"] = "grounded_summary"
+        data["reason"] = data.get("reason") or "Matched time-sensitive heuristic."
+        data["search_query"] = data.get("search_query") or build_default_search_query(user_text)
+    if data.get("route") == "research":
+        data["search_query"] = data.get("search_query") or build_default_search_query(user_text)
+    post_actions = list(dict.fromkeys(data.get("post_actions") or infer_post_actions(user_text)))
+    data["post_actions"] = post_actions
+    if post_actions and data.get("route") != "research" and likely_needs_research(user_text):
+        data["route"] = "research"
+        data["answer_mode"] = "grounded_summary"
+        data["reason"] = (
+            f"{data.get('reason', '').strip()} Research is required before completing follow-up actions."
+        ).strip()
+        data["search_query"] = data.get("search_query") or build_default_search_query(user_text)
+    return data
+
+
+def build_heuristic_planner_decision(user_text: str) -> dict:
+    route = "research" if likely_needs_research(user_text) else "agent"
+    reason = "Heuristic fallback route."
+    return normalize_planner_decision(
+        {
+            "route": route,
+            "reason": reason,
+            "search_query": build_default_search_query(user_text) if route == "research" else "",
+            "needs_fetch": route == "research",
+            "fetch_url": "",
+            "answer_mode": "grounded_summary" if route == "research" else "tool_agent",
+            "post_actions": infer_post_actions(user_text),
+        },
+        user_text,
+    )
+
+
+def score_fetchable_url(url: str) -> int:
+    domain = urlparse(url).netloc.lower()
+    if not domain:
+        return -100
+    score = 0
+    if domain.startswith("www."):
+        domain = domain[4:]
+    if domain in NON_FETCH_FRIENDLY_DOMAINS:
+        score -= 50
+    if any(token in domain for token in ("docs", "developer", "python.org", "wikipedia.org", "mozilla.org")):
+        score += 20
+    if any(token in domain for token in ("github.com", "github.io", "medium.com")):
+        score -= 5
+    return score
+
+
+def rank_fetch_urls(urls: list[str]) -> list[str]:
+    return sorted(dict.fromkeys(urls), key=score_fetchable_url, reverse=True)
+
+
+def trim_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n[Truncated]"
+
+
+def build_tool_trace(messages: list) -> list[dict]:
+    trace = []
+    for message in messages:
+        if isinstance(message, ToolMessage):
+            trace.append(
+                {
+                    "tool": getattr(message, "name", ""),
+                    "content": trim_text(str(message.content), 400),
+                }
+            )
+    return trace
 
 
 load_dotenv(BASE_DIR / ".env")
@@ -161,6 +290,9 @@ ONE_API_URL = os.getenv("ONE_API_URL", "http://127.0.0.1:3000/v1")
 ONE_API_TOKEN = os.getenv("ONE_API_TOKEN", "").strip()
 APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
 APP_PORT = int(os.getenv("APP_PORT", "8000"))
+PLANNER_MODEL = os.getenv("PLANNER_MODEL", "gpt-4o-mini")
+AGENT_MODEL = os.getenv("AGENT_MODEL", "gpt-4o")
+GROUNDED_ANSWER_MODEL = os.getenv("GROUNDED_ANSWER_MODEL", "").strip()
 SYSTEM_PROMPT_TEXT = load_system_prompt()
 
 if not ONE_API_TOKEN:
@@ -206,13 +338,12 @@ def remove_urls(text: str) -> str:
 
 
 async def planner_node(state: AgentState, config=None):
-    model_name = get_selected_model_name(config)
-    llm = get_llm(model_name).with_structured_output(PlannerDecision)
+    model_name = get_planner_model_name(config)
     user_text = get_latest_user_text(state["messages"])
     today = datetime.now().strftime("%Y-%m-%d")
 
     if not user_text:
-        return {"planner_decision": PlannerDecision().model_dump()}
+        return {"planner_decision": normalize_planner_decision(PlannerDecision(), user_text)}
 
     planner_prompt = [
         SystemMessage(
@@ -222,8 +353,9 @@ async def planner_node(state: AgentState, config=None):
                 "Choose route='research' when the request is time-sensitive, asks for latest/current/recent information, "
                 "or depends on news, prices, versions, dates, schedules, policies, weather, or anything likely to change.\n"
                 "Choose route='agent' for stable knowledge, simple writing tasks, or cases where normal tool-calling can continue.\n"
+                "If the user asks to email/search/report after gathering current information, set post_actions=['send_email'] when email sending remains after research.\n"
                 "For research, provide a concrete search query and set answer_mode='grounded_summary'.\n"
-                "For agent, set answer_mode='tool_agent'."
+                "Keep reasons short."
             )
         ),
         HumanMessage(
@@ -234,13 +366,37 @@ async def planner_node(state: AgentState, config=None):
             )
         ),
     ]
-    decision = await llm.ainvoke(planner_prompt)
-    logger.info("Planner route=%s reason=%s query=%s", decision.route, decision.reason, decision.search_query)
-    return {"planner_decision": decision.model_dump()}
+    try:
+        llm = get_llm(model_name).with_structured_output(PlannerDecision)
+        raw_decision = await llm.ainvoke(planner_prompt)
+    except Exception as exc:
+        fallback_model = get_agent_model_name(config)
+        if fallback_model == model_name:
+            logger.warning("Planner model %s failed, using heuristic fallback: %s", model_name, exc)
+            raw_decision = build_heuristic_planner_decision(user_text)
+        else:
+            logger.warning("Planner model %s failed, falling back to %s: %s", model_name, fallback_model, exc)
+            try:
+                llm = get_llm(fallback_model).with_structured_output(PlannerDecision)
+                raw_decision = await llm.ainvoke(planner_prompt)
+            except Exception as fallback_exc:
+                logger.warning("Planner fallback model %s failed, using heuristic fallback: %s", fallback_model, fallback_exc)
+                raw_decision = build_heuristic_planner_decision(user_text)
+    decision = normalize_planner_decision(raw_decision, user_text)
+    logger.info(
+        "Planner route=%s reason=%s query=%s post_actions=%s",
+        decision["route"],
+        decision["reason"],
+        decision["search_query"],
+        decision["post_actions"],
+    )
+    return {"planner_decision": decision}
 
 
 def route_after_planner(state: AgentState):
     decision = state.get("planner_decision") or {}
+    if decision.get("route") != "research" and should_force_research(get_latest_user_text(state["messages"])):
+        return "research"
     return decision.get("route", "agent")
 
 
@@ -255,6 +411,9 @@ async def search_node(state: AgentState):
 
 def route_after_search(state: AgentState):
     decision = state.get("planner_decision") or {}
+    search_result = state.get("search_result", "")
+    if search_result.startswith("Search failed:") or not extract_urls(search_result):
+        return "grounded_answer"
     if decision.get("needs_fetch"):
         return "fetch"
     return "grounded_answer"
@@ -263,25 +422,27 @@ def route_after_search(state: AgentState):
 async def fetch_node(state: AgentState):
     decision = state.get("planner_decision") or {}
     fetch_url = decision.get("fetch_url", "").strip()
-    if not fetch_url:
-        urls = extract_urls(state.get("search_result", ""))
-        fetch_url = urls[0] if urls else ""
-
-    if not fetch_url:
+    candidate_urls = [fetch_url] if fetch_url else rank_fetch_urls(extract_urls(state.get("search_result", "")))
+    if not candidate_urls:
         return {"fetch_result": ""}
-
-    fetch_result = fetch_webpage(fetch_url)
-    logger.info("Fetched webpage for grounded answer: %s", fetch_url)
-    return {"fetch_result": fetch_result}
+    attempts = []
+    for candidate_url in candidate_urls[:3]:
+        fetch_result = fetch_webpage(candidate_url)
+        attempts.append(candidate_url)
+        if not is_fetch_error(fetch_result):
+            logger.info("Fetched webpage for grounded answer: %s", candidate_url)
+            return {"fetch_result": fetch_result}
+        logger.warning("Fetch attempt failed for %s: %s", candidate_url, fetch_result)
+    return {"fetch_result": f"{fetch_result}\nTried URLs: {', '.join(attempts)}"}
 
 
 async def grounded_answer_node(state: AgentState, config=None):
-    model_name = get_selected_model_name(config)
+    model_name = get_grounded_answer_model_name(config)
     llm = get_llm(model_name)
     user_text = get_latest_user_text(state["messages"])
     today = datetime.now().strftime("%Y-%m-%d")
-    search_result = state.get("search_result", "")
-    fetch_result = state.get("fetch_result", "")
+    search_result = trim_text(state.get("search_result", ""), 1800)
+    fetch_result = trim_text(state.get("fetch_result", ""), 2200)
 
     grounded_messages = [
         SystemMessage(
@@ -307,11 +468,26 @@ async def grounded_answer_node(state: AgentState, config=None):
     return {"messages": [response]}
 
 
+def route_after_grounded_answer(state: AgentState):
+    decision = state.get("planner_decision") or {}
+    if decision.get("post_actions"):
+        return "agent"
+    return "__end__"
+
+
 async def agent_node(state: AgentState, config=None):
-    model_name = get_selected_model_name(config)
+    model_name = get_agent_model_name(config)
     llm = get_llm(model_name)
     llm_with_tools = llm.bind_tools([web_search, fetch_webpage, send_email])
-    system_msg = SystemMessage(content=build_runtime_system_prompt())
+    system_prompt = build_runtime_system_prompt()
+    decision = state.get("planner_decision") or {}
+    if decision.get("post_actions") and state.get("search_result"):
+        system_prompt += (
+            "\n\nA grounded research answer already exists in the conversation."
+            " Use that answer as the source of truth for any follow-up actions."
+            " Avoid repeating web_search or fetch_webpage unless the current evidence is clearly insufficient."
+        )
+    system_msg = SystemMessage(content=system_prompt)
     messages = state["messages"]
 
     if not messages or not isinstance(messages[0], SystemMessage):
@@ -353,6 +529,11 @@ async def lifespan(app: FastAPI):
             {"fetch": "fetch", "grounded_answer": "grounded_answer"},
         )
         workflow.add_edge("fetch", "grounded_answer")
+        workflow.add_conditional_edges(
+            "grounded_answer",
+            route_after_grounded_answer,
+            {"agent": "agent", "__end__": "__end__"},
+        )
         workflow.add_conditional_edges("agent", should_continue_agent, {"tools": "tools", "__end__": "__end__"})
         workflow.add_edge("tools", "agent")
 
@@ -381,6 +562,10 @@ async def health():
         "one_api_url": ONE_API_URL,
         "redis_url": REDIS_URL,
         "one_api_token_configured": bool(ONE_API_TOKEN),
+        "planner_model": PLANNER_MODEL,
+        "agent_model": AGENT_MODEL,
+        "grounded_answer_model": GROUNDED_ANSWER_MODEL or AGENT_MODEL,
+        "smtp_configured": smtp_is_configured(),
     }
 
 
@@ -412,7 +597,17 @@ async def chat(request: Request):
         new_thread = True
 
     model = data.get("model", "gpt-4o")
-    config = {"configurable": {"thread_id": thread_id, "model": model}}
+    planner_model = data.get("planner_model", PLANNER_MODEL)
+    grounded_model = data.get("grounded_model", GROUNDED_ANSWER_MODEL or model)
+    include_tool_trace = bool(data.get("include_tool_trace"))
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "model": model,
+            "planner_model": planner_model,
+            "grounded_model": grounded_model,
+        }
+    }
 
     try:
         langchain_messages = convert_to_langchain(messages)
@@ -424,7 +619,13 @@ async def chat(request: Request):
         final_message = result["messages"][-1]
         reply = final_message.content if hasattr(final_message, "content") else str(final_message)
         reply = remove_urls(reply)
-        response = {"reply": reply, "thread_id": thread_id}
+        response = {
+            "reply": reply,
+            "thread_id": thread_id,
+            "planner_decision": result.get("planner_decision", {}),
+        }
+        if include_tool_trace:
+            response["tool_trace"] = build_tool_trace(result["messages"])
         if new_thread:
             response["new_thread"] = True
         return JSONResponse(content=response)

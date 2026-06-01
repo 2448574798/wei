@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_DIR"
 
 if [[ -f ".env" ]]; then
   set -a
@@ -12,4 +13,4 @@ fi
 
 mkdir -p "${WEI_LOG_DIR:-./logs}"
 
-exec gunicorn app:app -c gunicorn.conf.py
+exec gunicorn src.app:app -c deploy/gunicorn.conf.py

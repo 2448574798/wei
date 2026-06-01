@@ -8,7 +8,7 @@ User=ubuntu
 Group=ubuntu
 WorkingDirectory=/opt/wei
 EnvironmentFile=/opt/wei/.env
-ExecStart=/opt/wei/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000 --proxy-headers
+ExecStart=/opt/wei/deploy/start_server.sh
 Restart=always
 RestartSec=5
 
