@@ -388,12 +388,29 @@ def call_online_research_model(user_text: str, search_query: str, model_name: st
             {"role": "user", "content": user_prompt},
         ],
     }
+    fallback_payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "user", "content": user_text},
+        ],
+    }
     headers = {
         "Authorization": f"Bearer {ONE_API_TOKEN}",
         "Content-Type": "application/json",
     }
     response = requests.post(endpoint, headers=headers, json=payload, timeout=90)
-    response.raise_for_status()
+    if response.status_code >= 400:
+        logger.warning(
+            "Online research primary request failed: status=%s body=%s",
+            response.status_code,
+            response.text[:1000],
+        )
+        response = requests.post(endpoint, headers=headers, json=fallback_payload, timeout=90)
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        body = response.text[:1000] if response is not None else ""
+        raise RuntimeError(f"Online research request failed: HTTP {response.status_code}. {body}") from exc
     data = response.json()
     choices = data.get("choices") or []
     if not choices:
