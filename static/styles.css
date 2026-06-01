@@ -461,7 +461,7 @@
     line-height: 1.62;
     gap: 8px;
     min-height: 1.62em;
-    margin: 0;
+    margin: 1em 0;
 }
 
 .loading-bubble > span:first-child {
