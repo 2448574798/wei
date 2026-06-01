@@ -2,41 +2,51 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes, viewport-fit=cover" />
-    <title>sunw.chat.ai</title>
-
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Sunwin Agent</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+    <link rel="shortcut icon" href="/static/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/static/favicon.svg" />
     <style>
         :root {
-            --bg: #f3f6fb;
-            --panel: rgba(255, 255, 255, 0.88);
-            --panel-solid: #ffffff;
-            --text: #0f172a;
+            --bg: #eef6ff;
+            --bg-accent: #dfeefe;
+            --panel: rgba(250, 253, 255, 0.86);
+            --panel-solid: #fafdff;
+            --text: #162033;
             --muted: #64748b;
-            --border: rgba(148, 163, 184, 0.32);
+            --border: rgba(125, 164, 214, 0.26);
             --primary: #2563eb;
-            --primary-hover: #1d4ed8;
-            --primary-soft: #dbeafe;
-            --assistant: #f1f5f9;
-            --assistant-border: #e2e8f0;
-            --danger: #ef4444;
-            --success: #16a34a;
-            --shadow: 0 20px 50px rgba(15, 23, 42, 0.10);
+            --primary-strong: #1d4ed8;
+            --primary-soft: rgba(37, 99, 235, 0.10);
+            --assistant: #f3f8fe;
+            --assistant-border: #dce8f6;
+            --user: linear-gradient(135deg, #2563eb, #38bdf8);
+            --success: #15803d;
+            --warning: #b45309;
+            --danger: #dc2626;
+            --shadow: 0 24px 60px rgba(37, 99, 235, 0.12);
             --radius-xl: 28px;
+            --radius-lg: 22px;
+            --radius-md: 16px;
+            --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
         }
 
         [data-theme="dark"] {
-            --bg: #020617;
-            --panel: rgba(15, 23, 42, 0.86);
-            --panel-solid: #0f172a;
+            --bg: #10151c;
+            --bg-accent: #1b2430;
+            --panel: rgba(18, 24, 32, 0.84);
+            --panel-solid: #141b24;
             --text: #e5e7eb;
             --muted: #94a3b8;
-            --border: rgba(148, 163, 184, 0.26);
-            --primary: #3b82f6;
-            --primary-hover: #60a5fa;
-            --primary-soft: rgba(59, 130, 246, 0.16);
-            --assistant: #111827;
-            --assistant-border: #1f2937;
-            --shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+            --border: rgba(148, 163, 184, 0.18);
+            --primary: #60a5fa;
+            --primary-strong: #93c5fd;
+            --primary-soft: rgba(96, 165, 250, 0.12);
+            --assistant: #18212c;
+            --assistant-border: #243243;
+            --user: linear-gradient(135deg, #2563eb, #38bdf8);
+            --shadow: 0 28px 70px rgba(0, 0, 0, 0.34);
         }
 
         * {
@@ -51,148 +61,221 @@
 
         body {
             margin: 0;
-            font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
-            background:
-                radial-gradient(circle at top left, rgba(37, 99, 235, 0.16), transparent 34%),
-                radial-gradient(circle at bottom right, rgba(14, 165, 233, 0.14), transparent 32%),
-                var(--bg);
+            font-family: "Segoe UI", "PingFang SC", "Noto Sans SC", sans-serif;
             color: var(--text);
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
+            background:
+                radial-gradient(circle at top left, rgba(59, 130, 246, 0.18), transparent 28%),
+                radial-gradient(circle at bottom right, rgba(14, 165, 233, 0.15), transparent 26%),
+                linear-gradient(160deg, var(--bg) 0%, var(--bg-accent) 100%);
             padding: 18px;
         }
 
+        button,
+        select,
+        textarea {
+            font: inherit;
+        }
+
         .app {
-            width: min(1100px, 100%);
+            width: min(1320px, 100%);
             height: calc(100vh - 36px);
+            margin: 0 auto;
             display: grid;
-            grid-template-rows: auto 1fr auto;
-            gap: 14px;
-            overflow: visible;
+            grid-template-columns: minmax(0, 1fr) 320px;
+            gap: 16px;
+        }
+
+        .chat-shell,
+        .side-shell {
+            min-height: 0;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            backdrop-filter: blur(16px);
+            box-shadow: var(--shadow);
+            border-radius: var(--radius-xl);
+        }
+
+        .chat-shell {
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr) auto;
+            overflow: hidden;
         }
 
         .topbar {
-            position: relative;
-            z-index: 1000;
-            overflow: visible;
-            background: var(--panel);
-            border: 1px solid var(--border);
-            box-shadow: var(--shadow);
-            backdrop-filter: blur(18px);
-            border-radius: var(--radius-xl);
-            padding: 16px;
+            padding: 18px;
+            border-bottom: 1px solid var(--border);
             display: flex;
             align-items: center;
             justify-content: space-between;
             gap: 14px;
+            flex-wrap: wrap;
         }
 
         .brand {
             display: flex;
             align-items: center;
-            gap: 12px;
+            gap: 14px;
             min-width: 0;
         }
 
         .logo {
-            width: 42px;
-            height: 42px;
-            border-radius: 15px;
-            background: linear-gradient(135deg, #2563eb, #06b6d4);
-            color: #ffffff;
-            font-size: 12px;
-            font-weight: 700;
-            letter-spacing: -0.04em;
-            text-transform: lowercase;
+            width: 48px;
+            height: 48px;
+            border-radius: 16px;
+            background: linear-gradient(135deg, #2563eb, #38bdf8);
+            color: #fff;
             display: grid;
             place-items: center;
-            box-shadow: 0 10px 24px rgba(37, 99, 235, 0.28);
+            font-weight: 800;
+            letter-spacing: -0.04em;
+            box-shadow: 0 12px 28px rgba(37, 99, 235, 0.24);
             flex: 0 0 auto;
         }
 
-        [data-theme="dark"] .logo {
-            background: linear-gradient(135deg, #3b82f6, #06b6d4);
+        .brand-copy {
+            min-width: 0;
         }
 
-        .brand h1 {
-            font-size: 18px;
-            line-height: 1.2;
+        .brand-copy h1 {
             margin: 0;
-            white-space: nowrap;
+            font-size: 20px;
+            line-height: 1.15;
+        }
+
+        .brand-copy p {
+            margin: 4px 0 0;
+            color: var(--muted);
+            font-size: 13px;
         }
 
         .toolbar {
             position: relative;
-            z-index: 1001;
             display: flex;
             align-items: center;
-            justify-content: flex-end;
             gap: 10px;
             flex-wrap: wrap;
-            overflow: visible;
         }
 
-        .select-wrap {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            background: var(--panel-solid);
-            border: 1px solid var(--border);
+        .toolbar-btn {
+            min-height: 46px;
             border-radius: 999px;
-            padding: 6px 16px;
-            min-height: 48px;
+            border: 1px solid var(--border);
+            background: var(--panel-solid);
+            color: var(--text);
+            padding: 0 16px;
+            cursor: pointer;
+            transition: 0.16s ease;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            font-weight: 700;
         }
 
-        .select-wrap label {
-            font-size: 14px;
-            font-weight: 500;
-            color: var(--muted);
-            white-space: nowrap;
+        .toolbar-btn:hover {
+            transform: translateY(-1px);
+            border-color: rgba(37, 99, 235, 0.32);
+            background: var(--primary-soft);
+        }
+
+        .toolbar-btn.subtle {
+            background: linear-gradient(135deg, rgba(255, 255, 255, 0.82), rgba(242, 248, 255, 0.98));
+        }
+
+        [data-theme="dark"] .toolbar-btn.subtle {
+            background: linear-gradient(135deg, rgba(30, 41, 59, 0.82), rgba(20, 27, 36, 0.96));
         }
 
         .model-picker {
             position: relative;
-            z-index: 1002;
-            overflow: visible;
-            padding: 6px;
         }
 
-        .native-model-select {
+        .model-select {
             position: absolute;
-            width: 1px;
-            height: 1px;
             opacity: 0;
             pointer-events: none;
-            left: -9999px;
+            width: 1px;
+            height: 1px;
         }
 
         .model-trigger {
-            border: none;
-            background: transparent;
+            min-height: 58px;
+            min-width: 278px;
+            border-radius: 22px;
+            border: 1px solid rgba(37, 99, 235, 0.14);
+            background:
+                linear-gradient(135deg, rgba(255, 255, 255, 0.82), rgba(239, 248, 255, 0.98)),
+                var(--panel-solid);
             color: var(--text);
-            display: inline-flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 8px;
-            min-width: 190px;
-            padding: 8px;
+            padding: 10px 14px 10px 16px;
             cursor: pointer;
-            font: inherit;
-            font-weight: 700;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            align-items: center;
+            gap: 12px;
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4);
+            transition: 0.18s ease;
+        }
+
+        [data-theme="dark"] .model-trigger {
+            background:
+                linear-gradient(135deg, rgba(30, 41, 59, 0.88), rgba(20, 27, 36, 0.96)),
+                var(--panel-solid);
+            border-color: rgba(96, 165, 250, 0.18);
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+        }
+
+        .model-trigger:hover,
+        .model-picker.open .model-trigger {
+            transform: translateY(-1px);
+            border-color: rgba(37, 99, 235, 0.30);
+            box-shadow:
+                0 12px 28px rgba(37, 99, 235, 0.12),
+                inset 0 1px 0 rgba(255, 255, 255, 0.42);
+        }
+
+        .model-copy {
+            min-width: 0;
+            display: grid;
+            gap: 3px;
             text-align: left;
         }
 
-        .model-current {
+        .model-eyebrow {
+            color: var(--muted);
+            font-size: 11px;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            font-weight: 800;
+        }
+
+        .model-main {
+            font-weight: 800;
+            font-size: 15px;
+            line-height: 1.15;
+            white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
+        }
+
+        .model-sub {
+            color: var(--muted);
+            font-size: 12px;
+            line-height: 1.3;
             white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
         .model-arrow {
-            color: var(--muted);
-            font-size: 18px;
-            line-height: 1;
+            width: 34px;
+            height: 34px;
+            border-radius: 50%;
+            display: grid;
+            place-items: center;
+            background: rgba(37, 99, 235, 0.08);
+            color: var(--primary-strong);
+            font-size: 14px;
             transition: transform 0.18s ease;
         }
 
@@ -202,96 +285,82 @@
 
         .model-menu {
             position: absolute;
-            top: calc(100% + 8px);
+            top: calc(100% + 10px);
             right: 0;
-            z-index: 9999;
-            width: 260px;
-            padding: 8px;
-            border-radius: 18px;
-            background: var(--panel-solid);
+            width: 320px;
+            padding: 10px;
+            border-radius: 24px;
             border: 1px solid var(--border);
-            box-shadow: 0 20px 50px rgba(15, 23, 42, 0.18);
+            background: rgba(255, 251, 245, 0.96);
+            backdrop-filter: blur(20px);
+            box-shadow: 0 24px 60px rgba(71, 55, 36, 0.18);
             display: none;
+            gap: 8px;
+            z-index: 20;
+        }
+
+        [data-theme="dark"] .model-menu {
+            background: rgba(20, 27, 36, 0.96);
+            box-shadow: 0 28px 64px rgba(0, 0, 0, 0.4);
         }
 
         .model-picker.open .model-menu {
             display: grid;
-            gap: 6px;
         }
 
         .model-option {
             width: 100%;
             border: 1px solid transparent;
+            border-radius: 18px;
             background: transparent;
             color: var(--text);
-            border-radius: 14px;
-            padding: 10px 12px;
+            padding: 12px 13px;
             cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
             text-align: left;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            align-items: center;
+            gap: 12px;
             transition: 0.16s ease;
         }
 
         .model-option:hover,
         .model-option.active {
+            border-color: rgba(37, 99, 235, 0.18);
             background: var(--primary-soft);
-            border-color: rgba(37, 99, 235, 0.35);
         }
 
-        .model-name {
-            font-weight: 800;
+        .model-option-copy {
+            min-width: 0;
+            display: grid;
+            gap: 4px;
+        }
+
+        .model-option-name {
             font-size: 14px;
+            font-weight: 800;
         }
 
-        .model-desc {
+        .model-option-desc {
             color: var(--muted);
             font-size: 12px;
+            line-height: 1.4;
+        }
+
+        .model-option-badge {
+            border-radius: 999px;
+            padding: 5px 9px;
+            background: rgba(37, 99, 235, 0.08);
+            color: var(--primary-strong);
+            font-size: 11px;
+            font-weight: 800;
             white-space: nowrap;
         }
 
-        .icon-btn {
-            border: 1px solid var(--border);
-            background: var(--panel-solid);
-            color: var(--text);
-            border-radius: 999px;
-            height: 48px;
-            padding: 0 16px;
-            cursor: pointer;
-            font-weight: 650;
-            display: inline-flex;
-            align-items: center;
-            gap: 7px;
-            transition: 0.18s ease;
-            font-size: 14px;
-        }
-
-        .icon-btn:hover {
-            transform: translateY(-1px);
-            border-color: rgba(37, 99, 235, 0.45);
-            background: var(--primary-soft);
-        }
-
-        .chat-panel {
-            position: relative;
-            z-index: 1;
-            min-height: 0;
-            background: var(--panel);
-            border: 1px solid var(--border);
-            box-shadow: var(--shadow);
-            backdrop-filter: blur(18px);
-            border-radius: var(--radius-xl);
-            overflow: hidden;
-            display: flex;
-            flex-direction: column;
-        }
-
         .messages {
-            flex: 1;
+            min-height: 0;
             overflow-y: auto;
-            padding: 22px;
+            padding: 20px 20px 10px;
             display: flex;
             flex-direction: column;
             gap: 18px;
@@ -300,35 +369,30 @@
 
         .empty {
             margin: auto;
+            max-width: 580px;
             text-align: center;
             color: var(--muted);
-            max-width: 560px;
-            padding: 26px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
+            padding: 32px 18px;
         }
 
         .empty h2 {
             margin: 0;
-            font-size: clamp(24px, 5vw, 42px);
-            line-height: 1.15;
-            font-weight: 500;
-            letter-spacing: -0.02em;
-            color: #64748b;
-            text-align: center;
+            color: var(--text);
+            font-size: clamp(28px, 5vw, 42px);
+            line-height: 1.08;
         }
 
-        [data-theme="dark"] .empty h2 {
-            color: #94a3b8;
+        .empty p {
+            margin: 12px 0 0;
+            line-height: 1.7;
         }
 
         .message {
+            max-width: min(86%, 860px);
             display: flex;
             flex-direction: column;
-            max-width: 85%;
-            animation: slideIn 0.18s ease;
+            gap: 8px;
+            animation: rise 0.18s ease;
         }
 
         .message.user {
@@ -339,10 +403,10 @@
             align-self: flex-start;
         }
 
-        @keyframes slideIn {
+        @keyframes rise {
             from {
                 opacity: 0;
-                transform: translateY(5px);
+                transform: translateY(6px);
             }
             to {
                 opacity: 1;
@@ -351,167 +415,190 @@
         }
 
         .bubble {
-            border-radius: 22px;
-            padding: 12px 16px;
-            line-height: 1.65;
+            border-radius: 24px;
+            padding: 14px 16px;
+            font-size: 15px;
+            line-height: 1.7;
             word-break: break-word;
             white-space: pre-wrap;
-            font-size: 15px;
         }
 
         .message.user .bubble {
-            background: var(--primary);
-            color: white;
-            border-bottom-right-radius: 6px;
+            background: var(--user);
+            color: #fff;
+            border-bottom-right-radius: 8px;
         }
 
         .message.assistant .bubble {
             background: var(--assistant);
-            color: var(--text);
             border: 1px solid var(--assistant-border);
-            border-bottom-left-radius: 6px;
+            border-bottom-left-radius: 8px;
         }
 
-        .message.assistant.loading-message {
-            align-self: flex-start;
-            max-width: 85%;
-            width: auto;
-        }
-
-        .message.assistant.loading-message .bubble.loading {
-            display: inline-flex;
-            align-items: center;
-            width: auto;
-            max-width: 85vw;
-            min-width: 0;
-            padding: 10px 14px;
-            font-size: 14px;
-            line-height: 1.62;
-            border-radius: 18px;
-            border-bottom-left-radius: 6px;
-            white-space: nowrap;
-            background: var(--assistant);
-            color: var(--text);
-            border: 1px solid var(--assistant-border);
-        }
-
-        .typing {
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-        }
-
-        .dot {
-            width: 5px;
-            height: 5px;
-            background: var(--muted);
-            border-radius: 50%;
-            animation: pulse 1s infinite ease-in-out;
-        }
-
-        .dot:nth-child(2) {
-            animation-delay: 0.15s;
-        }
-
-        .dot:nth-child(3) {
-            animation-delay: 0.3s;
-        }
-
-        @keyframes pulse {
-            0%, 80%, 100% {
-                transform: scale(0.6);
-                opacity: 0.45;
-            }
-            40% {
-                transform: scale(1);
-                opacity: 1;
-            }
-        }
-
-        .bubble pre {
-            margin: 10px 0;
-            padding: 12px;
-            overflow-x: auto;
-            border-radius: 14px;
-            background: rgba(15, 23, 42, 0.92);
-            color: #e5e7eb;
-            white-space: pre;
-        }
-
-        .bubble code {
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-            font-size: 0.92em;
-        }
-
-        .bubble p {
-            margin: 0 0 10px;
-        }
-
-        .bubble p:last-child {
-            margin-bottom: 0;
-        }
-
-        .bubble ul,
-        .bubble ol {
-            padding-left: 20px;
-            margin: 8px 0;
-        }
-
-        .meta {
+        .message-meta {
             color: var(--muted);
             font-size: 12px;
             display: flex;
-            gap: 8px;
             align-items: center;
+            gap: 10px;
             flex-wrap: wrap;
-            margin-top: 6px;
+            padding: 0 4px;
         }
 
         .copy-btn {
             border: none;
-            color: var(--muted);
             background: transparent;
+            color: var(--muted);
             cursor: pointer;
-            font-size: 12px;
             padding: 0;
+            font-size: 12px;
         }
 
         .copy-btn:hover {
             color: var(--primary);
         }
 
-        .composer {
-            background: var(--panel);
+        .trace-stack {
+            display: grid;
+            gap: 10px;
+        }
+
+        .trace-card {
+            background: var(--panel-solid);
             border: 1px solid var(--border);
-            box-shadow: var(--shadow);
-            backdrop-filter: blur(18px);
-            border-radius: var(--radius-xl);
-            padding: 12px;
+            border-radius: 18px;
+            overflow: hidden;
+        }
+
+        .trace-card summary {
+            list-style: none;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 12px 14px;
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        .trace-card summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .trace-card[open] summary {
+            border-bottom: 1px solid var(--border);
+            background: var(--primary-soft);
+        }
+
+        .trace-labels {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+        }
+
+        .trace-tag {
+            border-radius: 999px;
+            padding: 4px 9px;
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+        }
+
+        .trace-tag.route-research,
+        .trace-tag.trace {
+            background: rgba(37, 99, 235, 0.10);
+            color: #1d4ed8;
+        }
+
+        .trace-tag.route-agent {
+            background: rgba(14, 165, 233, 0.10);
+            color: #0369a1;
+        }
+
+        .trace-tag.action {
+            background: rgba(96, 165, 250, 0.12);
+            color: var(--primary-strong);
+        }
+
+        [data-theme="dark"] .trace-tag.route-research,
+        [data-theme="dark"] .trace-tag.trace {
+            color: #7dd3fc;
+        }
+
+        [data-theme="dark"] .trace-tag.route-agent {
+            color: #7dd3fc;
+        }
+
+        [data-theme="dark"] .trace-tag.action {
+            color: #bfdbfe;
+        }
+
+        .trace-content {
+            padding: 14px;
+            display: grid;
+            gap: 12px;
+        }
+
+        .kv-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .kv {
+            background: rgba(148, 163, 184, 0.06);
+            border-radius: 14px;
+            padding: 10px 12px;
+        }
+
+        .kv strong {
+            display: block;
+            color: var(--muted);
+            font-size: 11px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            margin-bottom: 5px;
+        }
+
+        .trace-pre {
+            margin: 0;
+            font-family: var(--mono);
+            font-size: 12px;
+            line-height: 1.65;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .composer {
+            padding: 14px;
+            border-top: 1px solid var(--border);
         }
 
         .input-box {
             display: flex;
             align-items: flex-end;
             gap: 10px;
+            padding: 10px 12px;
             background: var(--panel-solid);
             border: 1px solid var(--border);
             border-radius: 24px;
-            padding: 8px 12px;
         }
 
         textarea {
             flex: 1;
             min-width: 0;
-            min-height: 40px;
+            min-height: 44px;
             max-height: 180px;
             resize: none;
             border: none;
-            outline: none;
             background: transparent;
+            outline: none;
             color: var(--text);
-            font: inherit;
             line-height: 1.55;
-            padding: 10px 0;
+            padding: 10px 2px;
         }
 
         textarea::placeholder {
@@ -519,31 +606,21 @@
         }
 
         .send-btn {
-            width: 44px;
-            height: 44px;
-            min-width: 44px;
-            min-height: 44px;
-            border-radius: 50%;
+            width: 46px;
+            height: 46px;
+            min-width: 46px;
             border: none;
-            background: var(--primary);
-            color: white;
-            font-size: 18px;
+            border-radius: 50%;
+            background: var(--user);
+            color: #fff;
             cursor: pointer;
-            display: grid;
-            place-items: center;
-            transition: 0.18s ease;
-            flex: 0 0 auto;
-            padding: 0;
-        }
-
-        .send-btn:hover:not(:disabled) {
-            background: var(--primary-hover);
-            transform: translateY(-1px);
+            box-shadow: 0 12px 22px rgba(37, 99, 235, 0.24);
         }
 
         .send-btn:disabled {
-            opacity: 0.55;
+            opacity: 0.6;
             cursor: not-allowed;
+            box-shadow: none;
         }
 
         .composer-footer {
@@ -551,16 +628,16 @@
             justify-content: space-between;
             align-items: center;
             gap: 10px;
+            padding: 10px 4px 2px;
             color: var(--muted);
             font-size: 12px;
-            padding: 8px 6px 0;
             flex-wrap: wrap;
         }
 
-        .status {
+        .status-line {
             display: flex;
             align-items: center;
-            gap: 6px;
+            gap: 8px;
         }
 
         .status-dot {
@@ -570,412 +647,413 @@
             background: var(--success);
         }
 
-        .error {
-            color: var(--danger);
+        .side-shell {
+            display: grid;
+            grid-template-rows: auto auto minmax(0, 1fr);
+            overflow: hidden;
         }
 
-        @media (max-width: 720px) {
-            html,
-            body {
-                width: 100%;
-                height: 100%;
-                overflow: hidden;
-            }
+        .side-header {
+            padding: 18px 18px 12px;
+            border-bottom: 1px solid var(--border);
+        }
 
+        .side-header h2 {
+            margin: 0;
+            font-size: 16px;
+        }
+
+        .side-header p {
+            margin: 6px 0 0;
+            color: var(--muted);
+            line-height: 1.6;
+            font-size: 13px;
+        }
+
+        .summary-grid {
+            padding: 14px 18px;
+            display: grid;
+            gap: 10px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .summary-card {
+            background: var(--panel-solid);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            padding: 12px 14px;
+        }
+
+        .summary-card strong {
+            display: block;
+            font-size: 11px;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 6px;
+        }
+
+        .summary-value {
+            font-size: 14px;
+            font-weight: 700;
+            line-height: 1.55;
+            word-break: break-word;
+        }
+
+        .inspector {
+            min-height: 0;
+            overflow-y: auto;
+            padding: 14px 18px 18px;
+            display: grid;
+            gap: 12px;
+        }
+
+        .inspector-empty {
+            color: var(--muted);
+            font-size: 13px;
+            line-height: 1.7;
+            padding: 8px 2px;
+        }
+
+        .inspector-card {
+            background: var(--panel-solid);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            padding: 12px 14px;
+            display: grid;
+            gap: 8px;
+        }
+
+        .inspector-title {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .inspector-title h3 {
+            margin: 0;
+            font-size: 14px;
+        }
+
+        .inspector-card p,
+        .inspector-card pre {
+            margin: 0;
+            color: var(--muted);
+            font-size: 13px;
+            line-height: 1.7;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .loading-bubble {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .dots {
+            display: inline-flex;
+            gap: 4px;
+        }
+
+        .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--muted);
+            animation: pulse 1s infinite ease-in-out;
+        }
+
+        .dot:nth-child(2) {
+            animation-delay: 0.14s;
+        }
+
+        .dot:nth-child(3) {
+            animation-delay: 0.28s;
+        }
+
+        @keyframes pulse {
+            0%, 80%, 100% {
+                opacity: 0.36;
+                transform: scale(0.7);
+            }
+            40% {
+                opacity: 1;
+                transform: scale(1);
+            }
+        }
+
+        pre code,
+        code {
+            font-family: var(--mono);
+        }
+
+        .bubble pre {
+            margin: 10px 0;
+            padding: 12px;
+            border-radius: 16px;
+            overflow-x: auto;
+            background: rgba(15, 23, 42, 0.92);
+            color: #e5e7eb;
+            white-space: pre;
+        }
+
+        .messages,
+        .inspector {
+            scrollbar-width: thin;
+            scrollbar-color: rgba(148, 163, 184, 0.45) transparent;
+        }
+
+        @media (max-width: 1080px) {
             body {
-                padding: 0;
-                min-height: calc(var(--vh, 1vh) * 100);
-                background:
-                    radial-gradient(circle at top left, rgba(37, 99, 235, 0.16), transparent 34%),
-                    var(--bg);
+                padding: 12px;
             }
 
             .app {
                 width: 100%;
-                height: calc(var(--vh, 1vh) * 100);
-                min-height: calc(var(--vh, 1vh) * 100);
-                grid-template-rows: auto 1fr auto;
+                height: auto;
+                min-height: calc(100vh - 24px);
+                grid-template-columns: 1fr;
+            }
+
+            .chat-shell {
+                min-height: 64vh;
+            }
+
+            .side-shell {
+                min-height: 320px;
+            }
+        }
+
+        @media (max-width: 720px) {
+            body {
+                padding: 0;
+            }
+
+            .app {
+                min-height: 100vh;
                 gap: 8px;
-                padding: 8px;
+            }
+
+            .chat-shell,
+            .side-shell {
+                border-radius: 0;
             }
 
             .topbar {
-                border-radius: 22px;
-                padding: 12px;
-                align-items: stretch;
-                flex-direction: column;
-                gap: 12px;
-            }
-
-            .brand {
-                gap: 10px;
-            }
-
-            .logo {
-                width: 38px;
-                height: 38px;
-                border-radius: 13px;
-                font-size: 11px;
-            }
-
-            .brand h1 {
-                font-size: 16px;
+                padding: 14px;
             }
 
             .toolbar {
                 width: 100%;
                 display: grid;
                 grid-template-columns: 1fr 1fr;
-                gap: 8px;
             }
 
             .model-picker {
                 grid-column: 1 / -1;
-                width: 100%;
-                min-width: 0;
-                border-radius: 16px;
-                padding: 8px 10px;
-                display: grid;
-                grid-template-columns: auto 1fr;
-                align-items: center;
-                gap: 8px;
             }
 
             .model-trigger {
                 width: 100%;
                 min-width: 0;
-                padding: 7px 0;
+                min-height: 56px;
             }
 
             .model-menu {
                 left: 0;
                 right: 0;
                 width: 100%;
-                top: calc(100% + 6px);
-                border-radius: 18px;
-                padding: 7px;
-                box-shadow: 0 18px 42px rgba(15, 23, 42, 0.22);
             }
 
-            .model-option {
-                padding: 11px 12px;
-                border-radius: 14px;
-            }
-
-            .model-name {
-                font-size: 14px;
-            }
-
-            .model-desc {
-                font-size: 11px;
-            }
-
-            .icon-btn {
+            .toolbar-btn {
                 width: 100%;
-                height: 38px;
                 justify-content: center;
-                border-radius: 15px;
-                padding: 0 10px;
-                font-size: 13px;
-            }
-
-            .chat-panel,
-            .composer {
-                border-radius: 22px;
             }
 
             .messages {
-                padding: 12px;
-                gap: 14px;
-                overscroll-behavior: contain;
-            }
-
-            .empty {
-                padding: 16px 12px;
-            }
-
-            .empty h2 {
-                font-size: clamp(24px, 8vw, 34px);
-                line-height: 1.18;
-                max-width: 320px;
+                padding: 14px 12px 8px;
             }
 
             .message {
-                max-width: 90%;
+                max-width: 92%;
             }
 
             .bubble {
                 font-size: 14px;
-                line-height: 1.62;
-                padding: 10px 12px;
-                border-radius: 18px;
+                padding: 12px 14px;
             }
 
-            .message.user .bubble {
-                border-bottom-right-radius: 6px;
-            }
-
-            .message.assistant .bubble {
-                border-bottom-left-radius: 6px;
-            }
-
-            .meta {
-                font-size: 11px;
+            .kv-grid {
+                grid-template-columns: 1fr;
             }
 
             .composer {
-                padding: 8px;
-                padding-bottom: max(8px, env(safe-area-inset-bottom));
-            }
-
-            .input-box {
-                border-radius: 20px;
-                padding: 8px;
-                gap: 8px;
-            }
-
-            textarea {
-                max-height: 130px;
-                font-size: 15px;
-                padding: 9px 6px;
-                line-height: 1.45;
-            }
-
-            .send-btn {
-                width: 42px;
-                height: 42px;
-                min-width: 42px;
-                min-height: 42px;
-                font-size: 16px;
-            }
-
-            .composer-footer {
-                font-size: 11px;
-                padding: 6px 4px 0;
-            }
-
-            .status {
-                max-width: 100%;
-                overflow: hidden;
+                padding-bottom: max(14px, env(safe-area-inset-bottom));
             }
         }
-
-        @media (max-width: 390px) {
-            .app {
-                padding: 6px;
-            }
-
-            .topbar {
-                padding: 10px;
-            }
-
-            .toolbar {
-                gap: 6px;
-            }
-
-            .composer-footer {
-                display: none;
-            }
-
-            .messages {
-                padding: 10px;
-            }
-
-            .bubble {
-                font-size: 13.5px;
-            }
-
-            .send-btn {
-                width: 40px;
-                height: 40px;
-                min-width: 40px;
-                min-height: 40px;
-                font-size: 15px;
-            }
-        }
-
-        /* themed scrollbar */
-        .messages {
-            scrollbar-width: thin;
-            scrollbar-color: rgba(148, 163, 184, 0.45) transparent;
-        }
-
-        .messages::-webkit-scrollbar {
-            width: 8px;
-        }
-
-        .messages::-webkit-scrollbar-track {
-            background: transparent;
-        }
-
-        .messages::-webkit-scrollbar-thumb {
-            background: rgba(148, 163, 184, 0.45);
-            border-radius: 999px;
-            border: 2px solid transparent;
-            background-clip: content-box;
-        }
-
-        .messages::-webkit-scrollbar-thumb:hover {
-            background: rgba(100, 116, 139, 0.72);
-            background-clip: content-box;
-        }
-
-        [data-theme="dark"] .messages {
-            scrollbar-color: rgba(71, 85, 105, 0.85) transparent;
-        }
-
-        [data-theme="dark"] .messages::-webkit-scrollbar-track {
-            background: transparent;
-        }
-
-        [data-theme="dark"] .messages::-webkit-scrollbar-thumb {
-            background: rgba(71, 85, 105, 0.85);
-            border-radius: 999px;
-            border: 2px solid transparent;
-            background-clip: content-box;
-        }
-
-        [data-theme="dark"] .messages::-webkit-scrollbar-thumb:hover {
-            background: rgba(100, 116, 139, 0.95);
-            background-clip: content-box;
-        }
-
     </style>
 </head>
-
 <body>
     <main class="app">
-        <header class="topbar">
-            <div class="brand">
-                <div class="logo">sunw</div>
-                <div>
-                    <h1>我是Sunwin，一个靠谱的帮手</h1>
-                </div>
-            </div>
-
-            <div class="toolbar">
-                <div class="select-wrap model-picker" id="modelPicker">
-                    <label>模型</label>
-
-                    <select id="modelSelect" class="native-model-select" aria-hidden="true" tabindex="-1">
-                        <option value="gpt-4o-mini">GPT-4o-mini · 快速</option>
-                        <option value="gpt-4o">GPT-4o · 标准</option>
-                        <option value="gpt-5.4">GPT-5.4 · 均衡</option>
-                        <option value="gpt-5.5">GPT-5.5 · 最强</option>
-                    </select>
-
-                    <button type="button" class="model-trigger" id="modelTrigger" aria-haspopup="listbox" aria-expanded="false">
-                        <span class="model-current" id="modelCurrent">GPT-4o-mini · 快速</span>
-                        <span class="model-arrow">⌄</span>
-                    </button>
-
-                    <div class="model-menu" id="modelMenu" role="listbox">
-                        <button type="button" class="model-option" data-value="gpt-4o-mini">
-                            <span class="model-name">GPT-4o-mini</span>
-                            <span class="model-desc">快速 / 便宜</span>
-                        </button>
-                        <button type="button" class="model-option" data-value="gpt-4o">
-                            <span class="model-name">GPT-4o</span>
-                            <span class="model-desc">标准 / 多模态</span>
-                        </button>
-                        <button type="button" class="model-option" data-value="gpt-5.4">
-                            <span class="model-name">GPT-5.4</span>
-                            <span class="model-desc">均衡</span>
-                        </button>
-                        <button type="button" class="model-option" data-value="gpt-5.5">
-                            <span class="model-name">GPT-5.5</span>
-                            <span class="model-desc">最强</span>
-                        </button>
+        <section class="chat-shell">
+            <header class="topbar">
+                <div class="brand">
+                    <div class="logo">sunw</div>
+                    <div class="brand-copy">
+                        <h1>Sunwin Agent</h1>
+                        <p>看得见规划、看得见工具调用的工作流助手</p>
                     </div>
                 </div>
 
-                <button class="icon-btn" id="themeBtn" title="切换主题">🌙 主题</button>
-                <button class="icon-btn" id="clearBtn" title="清空对话">🗑️ 清空</button>
-            </div>
-        </header>
+                <div class="toolbar">
+                    <div class="model-picker" id="modelPicker">
+                        <select id="modelSelect" class="model-select" aria-hidden="true" tabindex="-1">
+                            <option value="gpt-4o-mini">GPT-4o-mini</option>
+                            <option value="gpt-4o">GPT-4o</option>
+                            <option value="gpt-5.4">GPT-5.4</option>
+                            <option value="gpt-5.5">GPT-5.5</option>
+                        </select>
 
-        <section class="chat-panel">
+                        <button id="modelTrigger" class="model-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                            <span class="model-copy">
+                                <span class="model-eyebrow">Active Model</span>
+                                <span class="model-main" id="modelCurrentName">GPT-4o-mini</span>
+                                <span class="model-sub" id="modelCurrentDesc">更快更省，适合日常问答与轻量工作流</span>
+                            </span>
+                            <span class="model-arrow">⌄</span>
+                        </button>
+
+                        <div class="model-menu" id="modelMenu" role="listbox">
+                            <button type="button" class="model-option" data-value="gpt-4o-mini">
+                                <span class="model-option-copy">
+                                    <span class="model-option-name">GPT-4o-mini</span>
+                                    <span class="model-option-desc">轻量、快速、成本低，适合作为默认交互模型</span>
+                                </span>
+                                <span class="model-option-badge">Fast</span>
+                            </button>
+                            <button type="button" class="model-option" data-value="gpt-4o">
+                                <span class="model-option-copy">
+                                    <span class="model-option-name">GPT-4o</span>
+                                    <span class="model-option-desc">更均衡，适合复杂一些的对话与工具协作</span>
+                                </span>
+                                <span class="model-option-badge">Balanced</span>
+                            </button>
+                            <button type="button" class="model-option" data-value="gpt-5.4">
+                                <span class="model-option-copy">
+                                    <span class="model-option-name">GPT-5.4</span>
+                                    <span class="model-option-desc">更强的综合能力，适合高质量回答和较复杂流程</span>
+                                </span>
+                                <span class="model-option-badge">Pro</span>
+                            </button>
+                            <button type="button" class="model-option" data-value="gpt-5.5">
+                                <span class="model-option-copy">
+                                    <span class="model-option-name">GPT-5.5</span>
+                                    <span class="model-option-desc">更偏高性能场景，适合最重的推理和执行任务</span>
+                                </span>
+                                <span class="model-option-badge">Max</span>
+                            </button>
+                        </div>
+                    </div>
+                    <button id="themeBtn" class="toolbar-btn subtle" type="button">主题</button>
+                    <button id="clearBtn" class="toolbar-btn subtle" type="button">新会话</button>
+                </div>
+            </header>
+
             <div class="messages" id="messages">
                 <div class="empty" id="emptyState">
-                    <h2>今天有什么想法？</h2>
+                    <h2>今天想让它帮你做什么？</h2>
+                    <p>你可以直接提问，也可以让它搜索、抓网页、总结，或者在拿到结果后继续执行动作。</p>
                 </div>
             </div>
+
+            <footer class="composer">
+                <div class="input-box">
+                    <textarea id="prompt" rows="1" placeholder="输入你的问题，回车发送，Shift + Enter 换行"></textarea>
+                    <button class="send-btn" id="sendBtn" title="发送">↑</button>
+                </div>
+
+                <div class="composer-footer">
+                    <div class="status-line" id="statusLine">
+                        <span class="status-dot"></span>
+                        <span id="statusText">已连接，默认返回 planner 与 tool trace</span>
+                    </div>
+                    <div><span id="charCount">0</span> 字</div>
+                </div>
+            </footer>
         </section>
 
-        <footer class="composer">
-            <div class="input-box">
-                <textarea id="prompt" rows="1" placeholder="输入你的问题..."></textarea>
-                <button class="send-btn" id="sendBtn" title="发送">➤</button>
+        <aside class="side-shell">
+            <div class="side-header">
+                <h2>执行面板</h2>
+                <p>显示本轮最新的路由决策、后续动作和工具调用摘要，方便你快速判断工作流是否走对。</p>
             </div>
 
-            <div class="composer-footer">
-                <div class="status" id="status">
-                    <span class="status-dot"></span>
-                    <span>已连接 · 支持联网搜索</span>
+            <div class="summary-grid">
+                <div class="summary-card">
+                    <strong>当前路由</strong>
+                    <div class="summary-value" id="summaryRoute">等待请求</div>
                 </div>
-                <div>
-                    <span id="charCount">0</span> 字 · 当前会保留上下文
+                <div class="summary-card">
+                    <strong>Planner 模式</strong>
+                    <div class="summary-value" id="summaryAnswerMode">-</div>
+                </div>
+                <div class="summary-card">
+                    <strong>后续动作</strong>
+                    <div class="summary-value" id="summaryActions">-</div>
                 </div>
             </div>
-        </footer>
+
+            <div class="inspector" id="inspector">
+                <div class="inspector-empty">发送一条消息后，这里会展示最新一轮的 planner 决策和工具执行摘要。</div>
+            </div>
+        </aside>
     </main>
 
     <script>
-        const messagesDiv = document.getElementById("messages");
-        const emptyState = document.getElementById("emptyState");
-        const promptInput = document.getElementById("prompt");
-        const sendBtn = document.getElementById("sendBtn");
-        const modelSelect = document.getElementById("modelSelect");
-        const clearBtn = document.getElementById("clearBtn");
-        const themeBtn = document.getElementById("themeBtn");
-        const statusEl = document.getElementById("status");
-        const charCount = document.getElementById("charCount");
+        const messagesEl = document.getElementById("messages");
+        const emptyStateEl = document.getElementById("emptyState");
+        const promptEl = document.getElementById("prompt");
+        const sendBtnEl = document.getElementById("sendBtn");
+        const clearBtnEl = document.getElementById("clearBtn");
+        const themeBtnEl = document.getElementById("themeBtn");
+        const modelSelectEl = document.getElementById("modelSelect");
+        const modelPickerEl = document.getElementById("modelPicker");
+        const modelTriggerEl = document.getElementById("modelTrigger");
+        const modelMenuEl = document.getElementById("modelMenu");
+        const modelCurrentNameEl = document.getElementById("modelCurrentName");
+        const modelCurrentDescEl = document.getElementById("modelCurrentDesc");
+        const statusTextEl = document.getElementById("statusText");
+        const statusLineEl = document.getElementById("statusLine");
+        const charCountEl = document.getElementById("charCount");
+        const inspectorEl = document.getElementById("inspector");
+        const summaryRouteEl = document.getElementById("summaryRoute");
+        const summaryAnswerModeEl = document.getElementById("summaryAnswerMode");
+        const summaryActionsEl = document.getElementById("summaryActions");
 
-        // 会话记忆 key
-        const THREAD_ID_KEY = "chat_thread_id";
+        const STORAGE_KEY = "sunwin_messages_v4";
+        const MODEL_KEY = "sunwin_model_v4";
+        const THEME_KEY = "sunwin_theme_v4";
+        const THREAD_KEY = "sunwin_thread_v4";
+
+        let chatHistory = [];
+        let isSending = false;
+        let latestInspector = null;
 
         function setViewportHeight() {
             document.documentElement.style.setProperty("--vh", `${window.innerHeight * 0.01}px`);
         }
 
-        setViewportHeight();
-        window.addEventListener("resize", setViewportHeight);
-        window.addEventListener("orientationchange", setViewportHeight);
-
-        const STORAGE_KEY = "chat_ui_messages_v3";
-        const MODEL_KEY = "chat_ui_model_v3";
-        const THEME_KEY = "chat_ui_theme_v3";
-
-        let chatHistory = [];
-        let isSending = false;
-
-        // 获取当前会话 thread_id
-        function getThreadId() {
-            return localStorage.getItem(THREAD_ID_KEY) || "";
-        }
-
-        // 保存新的 thread_id
-        function setThreadId(id) {
-            if (id) {
-                localStorage.setItem(THREAD_ID_KEY, id);
-            }
-        }
-
-        // 清除会话（新会话）
-        function clearThreadId() {
-            localStorage.removeItem(THREAD_ID_KEY);
-        }
-
         function nowTime() {
-            const d = new Date();
-            return d.toLocaleTimeString("zh-CN", {
+            return new Date().toLocaleTimeString("zh-CN", {
                 hour: "2-digit",
-                minute: "2-digit"
+                minute: "2-digit",
             });
         }
 
-        function escapeHtml(str) {
-            return String(str)
+        function escapeHtml(value) {
+            return String(value ?? "")
                 .replaceAll("&", "&amp;")
                 .replaceAll("<", "&lt;")
                 .replaceAll(">", "&gt;")
@@ -986,326 +1064,511 @@
         function renderMarkdownLite(text) {
             let html = escapeHtml(text || "");
 
-            html = html.replace(/```([\s\S]*?)```/g, (_, code) => {
-                return `<pre><code>${code.trim()}</code></pre>`;
-            });
-
+            html = html.replace(/```([\s\S]*?)```/g, (_, code) => `<pre><code>${code.trim()}</code></pre>`);
             html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
 
-            html = html
+            return html
                 .split(/\n{2,}/)
-                .map(block => {
+                .map((block) => {
                     const trimmed = block.trim();
                     if (!trimmed) return "";
                     if (trimmed.startsWith("<pre>")) return trimmed;
                     return `<p>${trimmed.replace(/\n/g, "<br>")}</p>`;
                 })
                 .join("");
-
-            return html;
         }
 
-        function getModelLabel(value) {
-            const labels = {
-                "gpt-4o-mini": "GPT-4o-mini · 快速",
-                "gpt-4o": "GPT-4o · 标准",
-                "gpt-5.4": "GPT-5.4 · 均衡",
-                "gpt-5.5": "GPT-5.5 · 最强"
+        function getThreadId() {
+            return localStorage.getItem(THREAD_KEY) || "";
+        }
+
+        function setThreadId(threadId) {
+            if (threadId) {
+                localStorage.setItem(THREAD_KEY, threadId);
+            }
+        }
+
+        function clearThreadId() {
+            localStorage.removeItem(THREAD_KEY);
+        }
+
+        function updateEmptyState() {
+            emptyStateEl.style.display = chatHistory.length ? "none" : "block";
+        }
+
+        function resizeInput() {
+            promptEl.style.height = "auto";
+            promptEl.style.height = `${Math.min(promptEl.scrollHeight, 180)}px`;
+            charCountEl.textContent = String(promptEl.value.length);
+        }
+
+        function setStatus(text, type = "ok") {
+            statusTextEl.textContent = text;
+            const dot = statusLineEl.querySelector(".status-dot");
+            dot.style.background = type === "error" ? "var(--danger)" : type === "warn" ? "var(--warning)" : "var(--success)";
+        }
+
+        function plannerLabel(route) {
+            if (route === "research") return "Research";
+            if (route === "agent") return "Agent";
+            return "未知";
+        }
+
+        function getModelMeta(value) {
+            const map = {
+                "gpt-4o-mini": {
+                    name: "GPT-4o-mini",
+                    desc: "更快更省，适合日常问答与轻量工作流",
+                },
+                "gpt-4o": {
+                    name: "GPT-4o",
+                    desc: "更均衡，适合复杂一些的对话与工具协作",
+                },
+                "gpt-5.4": {
+                    name: "GPT-5.4",
+                    desc: "更强的综合能力，适合高质量回答和较复杂流程",
+                },
+                "gpt-5.5": {
+                    name: "GPT-5.5",
+                    desc: "更偏高性能场景，适合最重的推理和执行任务",
+                },
             };
-            return labels[value] || value;
+            return map[value] || { name: value, desc: "当前模型" };
         }
 
         function syncModelPicker() {
-            const current = document.getElementById("modelCurrent");
-            const options = document.querySelectorAll(".model-option");
-            if (!current) return;
+            const meta = getModelMeta(modelSelectEl.value);
+            modelCurrentNameEl.textContent = meta.name;
+            modelCurrentDescEl.textContent = meta.desc;
 
-            current.textContent = getModelLabel(modelSelect.value);
-
-            options.forEach(btn => {
-                btn.classList.toggle("active", btn.dataset.value === modelSelect.value);
+            document.querySelectorAll(".model-option").forEach((button) => {
+                button.classList.toggle("active", button.dataset.value === modelSelectEl.value);
             });
         }
 
+        function closeModelPicker() {
+            modelPickerEl.classList.remove("open");
+            modelTriggerEl.setAttribute("aria-expanded", "false");
+        }
+
         function setupModelPicker() {
-            const picker = document.getElementById("modelPicker");
-            const trigger = document.getElementById("modelTrigger");
-            const menu = document.getElementById("modelMenu");
-
-            if (!picker || !trigger || !menu) return;
-
-            trigger.addEventListener("click", (e) => {
-                e.stopPropagation();
-                const isOpen = picker.classList.toggle("open");
-                trigger.setAttribute("aria-expanded", String(isOpen));
+            modelTriggerEl.addEventListener("click", (event) => {
+                event.stopPropagation();
+                const isOpen = modelPickerEl.classList.toggle("open");
+                modelTriggerEl.setAttribute("aria-expanded", String(isOpen));
             });
 
-            document.querySelectorAll(".model-option").forEach(btn => {
-                btn.addEventListener("click", (e) => {
-                    e.stopPropagation();
-                    modelSelect.value = btn.dataset.value;
-                    modelSelect.dispatchEvent(new Event("change"));
+            document.querySelectorAll(".model-option").forEach((button) => {
+                button.addEventListener("click", (event) => {
+                    event.stopPropagation();
+                    modelSelectEl.value = button.dataset.value;
                     syncModelPicker();
-                    picker.classList.remove("open");
-                    trigger.setAttribute("aria-expanded", "false");
+                    persistState();
+                    closeModelPicker();
                 });
             });
 
             document.addEventListener("click", () => {
-                picker.classList.remove("open");
-                trigger.setAttribute("aria-expanded", "false");
+                closeModelPicker();
             });
 
-            menu.addEventListener("click", (e) => {
-                e.stopPropagation();
+            modelMenuEl.addEventListener("click", (event) => {
+                event.stopPropagation();
             });
-
-            syncModelPicker();
         }
 
-        function saveState() {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(chatHistory));
-            localStorage.setItem(MODEL_KEY, modelSelect.value);
+        function answerModeLabel(mode) {
+            if (mode === "grounded_summary") return "Grounded Summary";
+            if (mode === "tool_agent") return "Tool Agent";
+            return "-";
         }
 
-        function loadState() {
-            const savedModel = localStorage.getItem(MODEL_KEY);
-            if (savedModel) {
-                modelSelect.value = savedModel;
+        function copyText(text, buttonEl) {
+            navigator.clipboard.writeText(text).then(() => {
+                const prev = buttonEl.textContent;
+                buttonEl.textContent = "已复制";
+                setTimeout(() => {
+                    buttonEl.textContent = prev;
+                }, 1200);
+            });
+        }
+
+        function createTraceBlock(meta) {
+            if (!meta || (!meta.plannerDecision && !meta.toolTrace?.length)) {
+                return null;
             }
 
-            const savedTheme = localStorage.getItem(THEME_KEY);
-            if (savedTheme === "dark") {
-                document.documentElement.setAttribute("data-theme", "dark");
-                themeBtn.textContent = "☀️ 主题";
+            const stack = document.createElement("div");
+            stack.className = "trace-stack";
+
+            if (meta.plannerDecision) {
+                const planner = meta.plannerDecision;
+                const card = document.createElement("details");
+                card.className = "trace-card";
+
+                const summary = document.createElement("summary");
+                summary.innerHTML = `
+                    <div class="trace-labels">
+                        <span class="trace-tag route-${escapeHtml(planner.route || "unknown")}">${escapeHtml(plannerLabel(planner.route))}</span>
+                        <span>Planner 决策</span>
+                    </div>
+                    <span>${escapeHtml(answerModeLabel(planner.answer_mode))}</span>
+                `;
+
+                const content = document.createElement("div");
+                content.className = "trace-content";
+
+                const actions = planner.post_actions?.length ? planner.post_actions.join(", ") : "无";
+                content.innerHTML = `
+                    <div class="kv-grid">
+                        <div class="kv">
+                            <strong>Route</strong>
+                            <div>${escapeHtml(planner.route || "-")}</div>
+                        </div>
+                        <div class="kv">
+                            <strong>Answer Mode</strong>
+                            <div>${escapeHtml(planner.answer_mode || "-")}</div>
+                        </div>
+                        <div class="kv">
+                            <strong>Needs Fetch</strong>
+                            <div>${planner.needs_fetch ? "Yes" : "No"}</div>
+                        </div>
+                        <div class="kv">
+                            <strong>Post Actions</strong>
+                            <div>${escapeHtml(actions)}</div>
+                        </div>
+                    </div>
+                    <div class="kv">
+                        <strong>Reason</strong>
+                        <div>${escapeHtml(planner.reason || "-")}</div>
+                    </div>
+                    <div class="kv">
+                        <strong>Search Query</strong>
+                        <pre class="trace-pre">${escapeHtml(planner.search_query || "-")}</pre>
+                    </div>
+                `;
+
+                card.append(summary, content);
+                stack.appendChild(card);
             }
 
-            try {
-                const raw = localStorage.getItem(STORAGE_KEY);
-                if (raw) {
-                    chatHistory = JSON.parse(raw) || [];
-                    chatHistory.forEach(m => addMessage(m.role, m.content, false));
-                }
-            } catch {
-                chatHistory = [];
+            if (meta.toolTrace?.length) {
+                const card = document.createElement("details");
+                card.className = "trace-card";
+
+                const summary = document.createElement("summary");
+                summary.innerHTML = `
+                    <div class="trace-labels">
+                        <span class="trace-tag trace">${meta.toolTrace.length}</span>
+                        <span>Tool Trace</span>
+                    </div>
+                    <span>展开查看</span>
+                `;
+
+                const content = document.createElement("div");
+                content.className = "trace-content";
+
+                meta.toolTrace.forEach((item, index) => {
+                    const block = document.createElement("div");
+                    block.className = "kv";
+                    block.innerHTML = `
+                        <strong>Step ${index + 1} · ${escapeHtml(item.tool || "tool")}</strong>
+                        <pre class="trace-pre">${escapeHtml(item.content || "-")}</pre>
+                    `;
+                    content.appendChild(block);
+                });
+
+                card.append(summary, content);
+                stack.appendChild(card);
             }
 
-            updateEmpty();
+            return stack;
         }
 
-        function updateEmpty() {
-            emptyState.style.display = chatHistory.length ? "none" : "block";
-        }
-
-        function setStatus(text, type = "ok") {
-            statusEl.innerHTML = `
-                <span class="status-dot" style="background:${type === "error" ? "var(--danger)" : "var(--success)"}"></span>
-                <span class="${type === "error" ? "error" : ""}">${text}</span>
-            `;
-        }
-
-        function addMessage(role, content, save = true, meta = "") {
-            updateEmpty();
-
-            const msgDiv = document.createElement("div");
-            msgDiv.className = `message ${role}`;
+        function addMessage(role, content, options = {}) {
+            const { save = true, time = nowTime(), meta = null } = options;
+            const wrapper = document.createElement("div");
+            wrapper.className = `message ${role}`;
 
             const bubble = document.createElement("div");
             bubble.className = "bubble";
             bubble.innerHTML = renderMarkdownLite(content);
 
-            const metaDiv = document.createElement("div");
-            metaDiv.className = "meta";
+            const metaRow = document.createElement("div");
+            metaRow.className = "message-meta";
 
-            const time = document.createElement("span");
-            time.textContent = meta || nowTime();
+            const timeEl = document.createElement("span");
+            timeEl.textContent = time;
 
             const copyBtn = document.createElement("button");
             copyBtn.className = "copy-btn";
+            copyBtn.type = "button";
             copyBtn.textContent = "复制";
-            copyBtn.addEventListener("click", async () => {
-                await navigator.clipboard.writeText(content);
-                copyBtn.textContent = "已复制";
-                setTimeout(() => copyBtn.textContent = "复制", 1200);
-            });
+            copyBtn.addEventListener("click", () => copyText(content, copyBtn));
 
-            metaDiv.appendChild(time);
-            metaDiv.appendChild(copyBtn);
+            metaRow.append(timeEl, copyBtn);
+            wrapper.append(bubble, metaRow);
 
-            msgDiv.appendChild(bubble);
-            msgDiv.appendChild(metaDiv);
-            messagesDiv.appendChild(msgDiv);
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
-
-            if (save) {
-                chatHistory.push({ role, content });
-                saveState();
+            const traceBlock = createTraceBlock(meta);
+            if (traceBlock) {
+                wrapper.appendChild(traceBlock);
             }
 
-            updateEmpty();
-            return msgDiv;
+            messagesEl.appendChild(wrapper);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+
+            if (save) {
+                chatHistory.push({ role, content, time, meta });
+                persistState();
+            }
+
+            updateEmptyState();
+            return wrapper;
         }
 
         function addLoadingMessage() {
-            updateEmpty();
-
-            const msgDiv = document.createElement("div");
-            msgDiv.className = "message assistant loading-message";
-            msgDiv.id = "loading-" + Date.now();
+            const wrapper = document.createElement("div");
+            wrapper.className = "message assistant";
+            wrapper.dataset.loading = "true";
 
             const bubble = document.createElement("div");
-            bubble.className = "bubble loading";
+            bubble.className = "bubble";
             bubble.innerHTML = `
-                <span class="typing">
+                <span class="loading-bubble">
                     <span>思考中</span>
-                    <span class="dot"></span>
-                    <span class="dot"></span>
-                    <span class="dot"></span>
+                    <span class="dots">
+                        <span class="dot"></span>
+                        <span class="dot"></span>
+                        <span class="dot"></span>
+                    </span>
                 </span>
             `;
 
-            msgDiv.appendChild(bubble);
-            messagesDiv.appendChild(msgDiv);
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
-
-            return msgDiv;
+            wrapper.appendChild(bubble);
+            messagesEl.appendChild(wrapper);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+            return wrapper;
         }
 
-        function resizeInput() {
-            promptInput.style.height = "auto";
-            promptInput.style.height = Math.min(promptInput.scrollHeight, 180) + "px";
-            charCount.textContent = promptInput.value.length;
+        function persistState() {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(chatHistory));
+            localStorage.setItem(MODEL_KEY, modelSelectEl.value);
+        }
+
+        function updateInspector(meta) {
+            latestInspector = meta || null;
+            summaryRouteEl.textContent = plannerLabel(meta?.plannerDecision?.route);
+            summaryAnswerModeEl.textContent = answerModeLabel(meta?.plannerDecision?.answer_mode);
+            summaryActionsEl.textContent = meta?.plannerDecision?.post_actions?.length
+                ? meta.plannerDecision.post_actions.join(", ")
+                : "无";
+
+            if (!meta || (!meta.plannerDecision && !meta.toolTrace?.length)) {
+                inspectorEl.innerHTML = `<div class="inspector-empty">发送一条消息后，这里会展示最新一轮的 planner 决策和工具执行摘要。</div>`;
+                return;
+            }
+
+            const planner = meta.plannerDecision || {};
+            const toolTrace = meta.toolTrace || [];
+
+            inspectorEl.innerHTML = "";
+
+            const plannerCard = document.createElement("section");
+            plannerCard.className = "inspector-card";
+            plannerCard.innerHTML = `
+                <div class="inspector-title">
+                    <h3>Planner 决策</h3>
+                    <span class="trace-tag route-${escapeHtml(planner.route || "unknown")}">${escapeHtml(plannerLabel(planner.route))}</span>
+                </div>
+                <p><strong>原因：</strong>${escapeHtml(planner.reason || "无")}</p>
+                <p><strong>Search Query：</strong>${escapeHtml(planner.search_query || "无")}</p>
+                <p><strong>Needs Fetch：</strong>${planner.needs_fetch ? "Yes" : "No"}</p>
+                <p><strong>Post Actions：</strong>${escapeHtml(planner.post_actions?.length ? planner.post_actions.join(", ") : "无")}</p>
+            `;
+            inspectorEl.appendChild(plannerCard);
+
+            const traceCard = document.createElement("section");
+            traceCard.className = "inspector-card";
+            traceCard.innerHTML = `
+                <div class="inspector-title">
+                    <h3>Tool Trace</h3>
+                    <span class="trace-tag trace">${toolTrace.length}</span>
+                </div>
+            `;
+
+            if (!toolTrace.length) {
+                const empty = document.createElement("p");
+                empty.textContent = "本轮没有返回工具调用摘要。";
+                traceCard.appendChild(empty);
+            } else {
+                toolTrace.forEach((item, index) => {
+                    const block = document.createElement("pre");
+                    block.textContent = `#${index + 1} ${item.tool || "tool"}\n${item.content || ""}`;
+                    traceCard.appendChild(block);
+                });
+            }
+
+            inspectorEl.appendChild(traceCard);
+        }
+
+        function loadState() {
+            const savedModel = localStorage.getItem(MODEL_KEY);
+            if (savedModel) {
+                modelSelectEl.value = savedModel;
+            }
+
+            const savedTheme = localStorage.getItem(THEME_KEY);
+            if (savedTheme === "dark") {
+                document.documentElement.setAttribute("data-theme", "dark");
+            }
+
+            try {
+                const raw = localStorage.getItem(STORAGE_KEY);
+                chatHistory = raw ? JSON.parse(raw) : [];
+            } catch {
+                chatHistory = [];
+            }
+
+            chatHistory.forEach((item) => addMessage(item.role, item.content, { save: false, time: item.time, meta: item.meta || null }));
+            updateEmptyState();
+
+            const lastAssistant = [...chatHistory].reverse().find((item) => item.role === "assistant" && item.meta);
+            updateInspector(lastAssistant?.meta || null);
         }
 
         async function sendMessage() {
-            const userMessage = promptInput.value.trim();
+            const userMessage = promptEl.value.trim();
+            if (!userMessage || isSending) {
+                return;
+            }
 
-            if (!userMessage || isSending) return;
-
-            // 前端长度校验（与后端一致）
             if (userMessage.length > 2000) {
-                setStatus("消息过长，最多2000字符", "error");
+                setStatus("消息过长，最多 2000 字符", "error");
                 return;
             }
 
             isSending = true;
-            sendBtn.disabled = true;
+            sendBtnEl.disabled = true;
             setStatus("正在请求模型...");
 
-            promptInput.value = "";
+            promptEl.value = "";
             resizeInput();
-
             addMessage("user", userMessage);
 
-            const loading = addLoadingMessage();
-            const selectedModel = modelSelect.value;
-            const threadId = getThreadId();
+            const loadingEl = addLoadingMessage();
 
             try {
                 const payload = {
-                    model: selectedModel,
-                    messages: [{ role: "user", content: userMessage }]
+                    model: modelSelectEl.value,
+                    messages: [{ role: "user", content: userMessage }],
+                    include_tool_trace: true,
                 };
+
+                const threadId = getThreadId();
                 if (threadId) {
                     payload.thread_id = threadId;
                 }
 
                 const response = await fetch("/api/chat", {
                     method: "POST",
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
-                    body: JSON.stringify(payload)
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
                 });
 
                 const data = await response.json().catch(() => ({}));
-
                 if (!response.ok) {
-                    throw new Error(data.error || `HTTP ${response.status}`);
+                    throw new Error(data.detail || data.error || `HTTP ${response.status}`);
                 }
 
-                // 保存后端返回的 thread_id（用于下次会话）
                 if (data.thread_id) {
                     setThreadId(data.thread_id);
                 }
 
-                const reply = data.reply || data.error || "无回复";
+                loadingEl.remove();
 
-                loading.remove();
+                const meta = {
+                    plannerDecision: data.planner_decision || null,
+                    toolTrace: data.tool_trace || [],
+                };
 
-                const suffix = data.used_tool ? " · 已使用联网搜索" : "";
-                addMessage("assistant", reply, true, nowTime() + suffix);
+                addMessage("assistant", data.reply || "无回复", { meta });
+                updateInspector(meta);
 
-                setStatus(data.used_tool ? "回答完成 · 已使用联网搜索" : "回答完成");
-
+                const route = data.planner_decision?.route;
+                const traceCount = data.tool_trace?.length || 0;
+                const statusSuffix = [route ? `route: ${route}` : "", traceCount ? `tools: ${traceCount}` : ""]
+                    .filter(Boolean)
+                    .join(" · ");
+                setStatus(statusSuffix ? `回答完成 · ${statusSuffix}` : "回答完成");
             } catch (error) {
-                loading.remove();
-
-                const msg = `请求失败：${error.message}`;
-                addMessage("assistant", msg);
-                setStatus(msg, "error");
-
+                loadingEl.remove();
+                const message = `请求失败：${error.message}`;
+                addMessage("assistant", message);
+                setStatus(message, "error");
             } finally {
                 isSending = false;
-                sendBtn.disabled = false;
-                promptInput.focus();
+                sendBtnEl.disabled = false;
+                promptEl.focus();
             }
         }
 
-        sendBtn.addEventListener("click", sendMessage);
+        function clearConversation() {
+            if (!window.confirm("确定要清空当前会话吗？这会开始一个新的 thread。")) {
+                return;
+            }
 
-        promptInput.addEventListener("keydown", (e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
+            chatHistory = [];
+            latestInspector = null;
+            localStorage.removeItem(STORAGE_KEY);
+            clearThreadId();
+
+            [...messagesEl.children].forEach((node) => {
+                if (node !== emptyStateEl) {
+                    node.remove();
+                }
+            });
+
+            updateEmptyState();
+            updateInspector(null);
+            setStatus("已清空会话，新的 thread 已就绪");
+        }
+
+        sendBtnEl.addEventListener("click", sendMessage);
+        clearBtnEl.addEventListener("click", clearConversation);
+
+        promptEl.addEventListener("input", resizeInput);
+        promptEl.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
                 sendMessage();
             }
         });
 
-        promptInput.addEventListener("input", resizeInput);
-
-        modelSelect.addEventListener("change", () => {
-            saveState();
+        modelSelectEl.addEventListener("change", () => {
+            persistState();
             syncModelPicker();
         });
 
-        clearBtn.addEventListener("click", () => {
-            if (!confirm("确定要清空当前对话吗？这将开始一个新会话。")) return;
-
-            // 清除聊天记录
-            chatHistory = [];
-            localStorage.removeItem(STORAGE_KEY);
-
-            // 清除会话 ID（开始新会话）
-            clearThreadId();
-
-            // 清空界面
-            [...messagesDiv.children].forEach(child => {
-                if (child.id !== "emptyState") child.remove();
-            });
-
-            updateEmpty();
-            setStatus("已清空对话，新会话已创建");
-        });
-
-        themeBtn.addEventListener("click", () => {
-            const current = document.documentElement.getAttribute("data-theme");
-
-            if (current === "dark") {
+        themeBtnEl.addEventListener("click", () => {
+            const dark = document.documentElement.getAttribute("data-theme") === "dark";
+            if (dark) {
                 document.documentElement.removeAttribute("data-theme");
                 localStorage.setItem(THEME_KEY, "light");
-                themeBtn.textContent = "🌙 主题";
             } else {
                 document.documentElement.setAttribute("data-theme", "dark");
                 localStorage.setItem(THEME_KEY, "dark");
-                themeBtn.textContent = "☀️ 主题";
             }
         });
+
+        setViewportHeight();
+        window.addEventListener("resize", setViewportHeight);
+        window.addEventListener("orientationchange", setViewportHeight);
 
         loadState();
         setupModelPicker();
         syncModelPicker();
         resizeInput();
-        promptInput.focus();
+        promptEl.focus();
     </script>
 </body>
 </html>
