@@ -314,6 +314,7 @@ APP_PORT = int(os.getenv("APP_PORT", "8000"))
 PLANNER_MODEL = os.getenv("PLANNER_MODEL", "gpt-4o-mini")
 AGENT_MODEL = os.getenv("AGENT_MODEL", "gpt-4o")
 ONLINE_RESEARCH_MODEL = os.getenv("ONLINE_RESEARCH_MODEL", "gpt-4o-mini-search-preview")
+ONLINE_RESEARCH_MAX_TOKENS = int(os.getenv("ONLINE_RESEARCH_MAX_TOKENS", "420"))
 SYSTEM_PROMPT_TEXT = load_system_prompt()
 
 if not ONE_API_TOKEN:
@@ -358,6 +359,21 @@ def remove_urls(text: str) -> str:
     return re.sub(r"https?://\S+", "", text)
 
 
+def remove_markdown_links(text: str) -> str:
+    text = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1", text)
+    text = re.sub(r"\((https?://[^)]+)\)", "", text)
+    text = re.sub(r"\(([A-Za-z0-9.-]+\.[A-Za-z]{2,})\)", "", text)
+    return text
+
+
+def clean_online_research_output(text: str) -> str:
+    cleaned = remove_markdown_links(text or "")
+    cleaned = remove_urls(cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    return cleaned.strip()
+
+
 def call_online_research_model(user_text: str, search_query: str, model_name: str) -> str:
     if not ONE_API_TOKEN:
         raise RuntimeError("ONE_API_TOKEN is not configured.")
@@ -369,7 +385,9 @@ def call_online_research_model(user_text: str, search_query: str, model_name: st
         f"今天日期是 {today}。\n"
         "你是一名支持内置联网搜索的研究助手。\n"
         "当问题涉及当前、最新、会变化的信息时，请先联网核实，再给出结论。\n"
-        "请输出简洁中文答案；若证据不足，要明确说明。"
+        "请输出简洁中文答案；若证据不足，要明确说明。\n"
+        "不要输出 Markdown 链接、括号引用、来源网址或原始搜索引用格式。\n"
+        "优先直接给结论和必要要点，控制篇幅，避免冗长展开。"
     )
     user_prompt = (
         f"用户请求：{user_text}\n\n"
@@ -379,6 +397,7 @@ def call_online_research_model(user_text: str, search_query: str, model_name: st
     payload = {
         "model": model_name,
         "temperature": 0.2,
+        "max_tokens": ONLINE_RESEARCH_MAX_TOKENS,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -386,6 +405,7 @@ def call_online_research_model(user_text: str, search_query: str, model_name: st
     }
     fallback_payload = {
         "model": model_name,
+        "max_tokens": ONLINE_RESEARCH_MAX_TOKENS,
         "messages": [
             {"role": "user", "content": user_text},
         ],
@@ -426,7 +446,7 @@ def call_online_research_model(user_text: str, search_query: str, model_name: st
     content = (content or "").strip()
     if not content:
         raise RuntimeError("Online research model returned empty content.")
-    return content
+    return trim_text(clean_online_research_output(content), 1200)
 
 
 async def planner_node(state: AgentState, config=None):
@@ -502,9 +522,9 @@ async def online_research_node(state: AgentState, config=None):
     answer = call_online_research_model(user_text, query, model_name)
     trace_entry = {
         "tool": "online_research",
-        "content": format_trace_content(
-            f"联网思考模型：{model_name}\n搜索焦点：{query}",
-            answer,
+        "content": trim_text(
+            f"联网思考模型：{model_name}\n搜索焦点：{query}\n状态：已完成联网思考并生成回答",
+            400,
         ),
     }
     return {
