@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlparse
 
+import requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -22,60 +22,42 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from src.tools import fetch_webpage, is_fetch_error, send_email, smtp_is_configured, web_search
+from src.tools import send_email, smtp_is_configured
 
 
 SRC_DIR = Path(__file__).resolve().parent
 BASE_DIR = SRC_DIR.parent
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
+
 TIME_SENSITIVE_PATTERN = re.compile(
-    "(今天|昨日|昨天|明天|现在|当前|目前|最新|最近|刚刚|实时|近况|行情|价格|汇率|股价|新闻|天气|"
-    "版本|更新|发布|API|SDK|模型|文档|政策|法规|公告|比赛|赛程|票房|销量|"
-    "today|now|current|latest|recent|price|weather|news|version|release|api|sdk|model)",
-    re.IGNORECASE,
-)
-SEARCH_URL_PATTERN = re.compile(r"^URL:\s*(\S+)$", re.MULTILINE)
-EMAIL_ACTION_PATTERN = re.compile(
-    "(发送到|发送给|发到|发给|发送|发邮件|邮件|邮箱|email|mail)",
+    r"(今天|今日|昨天|昨日|明天|后天|现在|当前|目前|最新|最近|刚刚|实时|近况|行情|价格|汇率|股价|新闻|天气|"
+    r"版本|更新|发布|文档|政策|法规|公告|比赛|赛程|票房|销量|"
+    r"today|yesterday|tomorrow|now|current|latest|recent|price|weather|news|version|release)",
     re.IGNORECASE,
 )
 SEARCH_ACTION_PATTERN = re.compile(
-    "(搜索|搜一个|查询|查一个|联网|网页|网站|fetch|search|browse|look up)",
+    r"(搜索|查询|联网|网页|网站|查一下|搜一下|fetch|search|browse|look up)",
     re.IGNORECASE,
 )
-NON_FETCH_FRIENDLY_DOMAINS = {
-    "help.openai.com",
-    "support.google.com",
-    "docs.github.com",
-}
+EMAIL_ACTION_PATTERN = re.compile(
+    r"(发送到|发送给|发到|发给|发送|发邮件|邮件|邮箱|email|mail)",
+    re.IGNORECASE,
+)
 
 
 class PlannerDecision(BaseModel):
-    route: Literal["research", "agent"] = Field(
-        default="agent",
-        description="Use research for time-sensitive/current information, otherwise use agent.",
-    )
-    reason: str = Field(default="", description="Short reason for the decision.")
-    search_query: str = Field(default="", description="Search query for research route.")
-    needs_fetch: bool = Field(
-        default=False,
-        description="Whether a webpage should be fetched after search for more detail.",
-    )
-    fetch_url: str = Field(default="", description="Optional URL to fetch after search.")
-    answer_mode: Literal["grounded_summary", "tool_agent"] = Field(
-        default="tool_agent",
-        description="How the answer should be produced.",
-    )
-    post_actions: list[Literal["send_email"]] = Field(
-        default_factory=list,
-        description="Actions that should happen after grounded research is complete.",
-    )
+    route: Literal["research", "agent"] = Field(default="agent")
+    reason: str = Field(default="")
+    search_query: str = Field(default="")
+    needs_fetch: bool = Field(default=False)
+    fetch_url: str = Field(default="")
+    answer_mode: Literal["grounded_summary", "tool_agent"] = Field(default="tool_agent")
+    post_actions: list[Literal["send_email"]] = Field(default_factory=list)
 
 
 class AgentState(MessagesState):
     planner_decision: dict
-    search_result: str
-    fetch_result: str
+    research_result: str
     tool_trace: list[dict]
 
 
@@ -87,7 +69,6 @@ def load_dotenv(env_path: Path) -> None:
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
-
         key, value = line.split("=", 1)
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
@@ -144,11 +125,18 @@ def build_runtime_system_prompt() -> str:
     today = datetime.now().strftime("%Y-%m-%d")
     policy = (
         f"今天日期是 {today}。\n"
-        "如果请求依赖当前、最近、带版本、带日期、带赛程，或其他可能变化的信息，"
-        "优先依赖工具证据而不是模型记忆。\n"
+        "如果请求依赖当前、最近、版本、日期、赛程等可能变化的信息，优先依赖工具证据而不是模型记忆。\n"
         "如果证据不足，请明确说明无法确认。"
     )
     return f"{SYSTEM_PROMPT_TEXT}\n\n{policy}"
+
+
+def has_relative_date(text: str) -> bool:
+    return bool(re.search(r"今天|今日|明天|后天|昨天|昨日|\btoday\b|\btomorrow\b|\byesterday\b", text, re.IGNORECASE))
+
+
+def has_explicit_date(text: str) -> bool:
+    return bool(re.search(r"\d{4}[-/.年]\d{1,2}([-/\.月]\d{1,2})?", text))
 
 
 def format_cn_date(value: datetime) -> str:
@@ -169,19 +157,10 @@ def expand_relative_dates(text: str) -> str:
         (r"\btomorrow\b", (now + timedelta(days=1)).strftime("%Y-%m-%d")),
         (r"\byesterday\b", (now - timedelta(days=1)).strftime("%Y-%m-%d")),
     ]
-
     expanded = text
     for pattern, replacement in replacements:
         expanded = re.sub(pattern, replacement, expanded, flags=re.IGNORECASE)
     return expanded
-
-
-def has_explicit_date(text: str) -> bool:
-    return bool(re.search(r"\d{4}[-/.年]\d{1,2}([-/\.月]\d{1,2})?", text))
-
-
-def has_relative_date(text: str) -> bool:
-    return bool(re.search(r"今天|今日|明天|后天|昨天|昨日|\btoday\b|\btomorrow\b|\byesterday\b", text, re.IGNORECASE))
 
 
 def build_default_search_query(user_text: str) -> str:
@@ -200,105 +179,10 @@ def build_default_search_query(user_text: str) -> str:
 def normalize_search_query(query: str, user_text: str) -> str:
     if has_relative_date(user_text):
         return build_default_search_query(user_text)
-
     cleaned = (query or "").strip()
     if not cleaned:
         return build_default_search_query(user_text)
-
-    cleaned = expand_relative_dates(cleaned)
-    return cleaned
-
-
-def is_weather_query(text: str) -> bool:
-    return bool(
-        re.search(
-            r"天气|气温|降雨|预报|气象|weather|forecast|temperature|rain",
-            text or "",
-            re.IGNORECASE,
-        )
-    )
-
-
-def extract_date_tokens(text: str) -> list[str]:
-    if not text:
-        return []
-
-    patterns = [
-        r"\d{4}年\d{1,2}月\d{1,2}日",
-        r"\d{4}-\d{1,2}-\d{1,2}",
-        r"\d{4}/\d{1,2}/\d{1,2}",
-        r"\d{4}\.\d{1,2}\.\d{1,2}",
-    ]
-
-    tokens: list[str] = []
-    seen: set[str] = set()
-    for pattern in patterns:
-        for match in re.findall(pattern, text):
-            if match not in seen:
-                seen.add(match)
-                tokens.append(match)
-    return tokens
-
-
-def strip_date_tokens(text: str) -> str:
-    cleaned = text or ""
-    cleaned = re.sub(r"\d{4}年\d{1,2}月\d{1,2}日", " ", cleaned)
-    cleaned = re.sub(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}", " ", cleaned)
-    cleaned = re.sub(r"(和|与|以及|及|and|to|through|between)", " ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"[，,、]+", " ", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned
-
-
-def build_search_queries(query: str, user_text: str) -> list[str]:
-    normalized_query = normalize_search_query(query, user_text)
-    if not is_weather_query(user_text):
-        return [normalized_query]
-
-    expanded_user_text = expand_relative_dates(user_text)
-    date_tokens = extract_date_tokens(normalized_query)
-    if len(date_tokens) < 2:
-        user_dates = extract_date_tokens(expanded_user_text)
-        if len(user_dates) > len(date_tokens):
-            date_tokens = user_dates
-
-    if len(date_tokens) < 2:
-        return [normalized_query]
-
-    topic = strip_date_tokens(expanded_user_text)
-    if not topic:
-        topic = strip_date_tokens(normalized_query)
-    if not topic:
-        return [normalized_query]
-
-    return [f"{date_token} {topic}".strip() for date_token in date_tokens]
-
-
-def extract_urls(search_result: str) -> list[str]:
-    return SEARCH_URL_PATTERN.findall(search_result)
-
-
-def is_time_sensitive(user_text: str) -> bool:
-    return bool(TIME_SENSITIVE_PATTERN.search(user_text))
-
-
-def get_agent_model_name(config) -> str:
-    model_name = AGENT_MODEL
-    if config and "configurable" in config:
-        model_name = config["configurable"].get("model", model_name)
-    return model_name
-
-
-def get_planner_model_name(config) -> str:
-    if config and "configurable" in config and config["configurable"].get("planner_model"):
-        return config["configurable"]["planner_model"]
-    return PLANNER_MODEL
-
-
-def get_grounded_answer_model_name(config) -> str:
-    if config and "configurable" in config and config["configurable"].get("grounded_model"):
-        return config["configurable"]["grounded_model"]
-    return GROUNDED_ANSWER_MODEL or get_agent_model_name(config)
+    return expand_relative_dates(cleaned)
 
 
 def extract_email_targets(user_text: str) -> list[str]:
@@ -312,15 +196,15 @@ def infer_post_actions(user_text: str) -> list[str]:
     return []
 
 
-def should_force_research(user_text: str) -> bool:
-    return bool(user_text and is_time_sensitive(user_text))
+def is_time_sensitive(user_text: str) -> bool:
+    return bool(TIME_SENSITIVE_PATTERN.search(user_text))
 
 
 def likely_needs_research(user_text: str) -> bool:
-    return should_force_research(user_text) or bool(SEARCH_ACTION_PATTERN.search(user_text))
+    return is_time_sensitive(user_text) or bool(SEARCH_ACTION_PATTERN.search(user_text))
 
 
-def localize_planner_reason(reason: str, route: str, user_text: str, post_actions: list[str] | None = None) -> str:
+def localize_planner_reason(reason: str, route: str, post_actions: list[str] | None = None) -> str:
     text = (reason or "").strip()
     post_actions = post_actions or []
 
@@ -332,22 +216,14 @@ def localize_planner_reason(reason: str, route: str, user_text: str, post_action
         return "已根据当前请求选择执行路径。"
 
     lowered = text.lower()
-
-    if "heuristic fallback route" in lowered:
-        return "模型规划不可用，已使用本地规则选择执行路径。"
-    if "matched time-sensitive heuristic" in lowered:
-        return "命中了时效性规则，因此优先走调研路径。"
-    if "research is required before completing follow-up actions" in lowered:
-        return "需要先完成调研，再继续执行后续动作。"
     if "time-sensitive" in lowered or "current" in lowered or "latest" in lowered or "recent" in lowered:
         return "用户请求涉及时效性或最新信息，适合先调研再回答。"
-    if "stable knowledge" in lowered or "does not require current information" in lowered:
-        return "用户请求更偏稳定知识，不需要先联网调研。"
     if "email" in lowered and post_actions:
         return "需要先整理信息，再继续执行邮件等后续动作。"
     if "search" in lowered and route == "research":
         return "这个请求需要先搜索和核实资料。"
-
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return text
     if route == "research":
         return "已判断这个请求更适合先调研，再基于结果回答。"
     if route == "agent":
@@ -357,62 +233,43 @@ def localize_planner_reason(reason: str, route: str, user_text: str, post_action
 
 def normalize_planner_decision(decision: PlannerDecision | dict, user_text: str) -> dict:
     data = decision.model_dump() if isinstance(decision, PlannerDecision) else dict(decision)
-    forced_research = should_force_research(user_text)
+    forced_research = is_time_sensitive(user_text)
     if forced_research:
         data["route"] = "research"
         data["answer_mode"] = "grounded_summary"
         data["reason"] = data.get("reason") or "命中了时效性规则。"
-        data["search_query"] = normalize_search_query(data.get("search_query", ""), user_text)
+
     if data.get("route") == "research":
         data["search_query"] = normalize_search_query(data.get("search_query", ""), user_text)
+
     post_actions = list(dict.fromkeys(data.get("post_actions") or infer_post_actions(user_text)))
     data["post_actions"] = post_actions
     if post_actions and data.get("route") != "research" and likely_needs_research(user_text):
         data["route"] = "research"
         data["answer_mode"] = "grounded_summary"
-        data["reason"] = (
-            f"{data.get('reason', '').strip()} 需要先完成调研，再继续执行后续动作。"
-        ).strip()
+        data["reason"] = f"{data.get('reason', '').strip()} 需要先完成调研，再继续执行后续动作。".strip()
         data["search_query"] = normalize_search_query(data.get("search_query", ""), user_text)
-    data["reason"] = localize_planner_reason(data.get("reason", ""), data.get("route", "agent"), user_text, post_actions)
+
+    data["needs_fetch"] = False
+    data["fetch_url"] = ""
+    data["reason"] = localize_planner_reason(data.get("reason", ""), data.get("route", "agent"), post_actions)
     return data
 
 
 def build_heuristic_planner_decision(user_text: str) -> dict:
     route = "research" if likely_needs_research(user_text) else "agent"
-    reason = "本地规则兜底路径。"
     return normalize_planner_decision(
         {
             "route": route,
-            "reason": reason,
+            "reason": "本地规则兜底路径。",
             "search_query": build_default_search_query(user_text) if route == "research" else "",
-            "needs_fetch": route == "research",
+            "needs_fetch": False,
             "fetch_url": "",
             "answer_mode": "grounded_summary" if route == "research" else "tool_agent",
             "post_actions": infer_post_actions(user_text),
         },
         user_text,
     )
-
-
-def score_fetchable_url(url: str) -> int:
-    domain = urlparse(url).netloc.lower()
-    if not domain:
-        return -100
-    score = 0
-    if domain.startswith("www."):
-        domain = domain[4:]
-    if domain in NON_FETCH_FRIENDLY_DOMAINS:
-        score -= 50
-    if any(token in domain for token in ("docs", "developer", "python.org", "wikipedia.org", "mozilla.org")):
-        score += 20
-    if any(token in domain for token in ("github.com", "github.io", "medium.com")):
-        score -= 5
-    return score
-
-
-def rank_fetch_urls(urls: list[str]) -> list[str]:
-    return sorted(dict.fromkeys(urls), key=score_fetchable_url, reverse=True)
 
 
 def trim_text(text: str, limit: int) -> str:
@@ -447,20 +304,20 @@ def append_tool_trace(state: AgentState, entries: list[dict]) -> list[dict]:
 
 
 def format_trace_content(title: str, body: str) -> str:
-    return trim_text(f"{title}\n\n{body}", 400)
+    return trim_text(f"{title}\n\n{body}", 800)
 
 
 load_dotenv(BASE_DIR / ".env")
 logger = configure_logger()
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
-ONE_API_URL = os.getenv("ONE_API_URL", "http://127.0.0.1:3000/v1")
+ONE_API_URL = os.getenv("ONE_API_URL", "http://127.0.0.1:3000/v1").rstrip("/")
 ONE_API_TOKEN = os.getenv("ONE_API_TOKEN", "").strip()
 APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
 APP_PORT = int(os.getenv("APP_PORT", "8000"))
 PLANNER_MODEL = os.getenv("PLANNER_MODEL", "gpt-4o-mini")
 AGENT_MODEL = os.getenv("AGENT_MODEL", "gpt-4o")
-GROUNDED_ANSWER_MODEL = os.getenv("GROUNDED_ANSWER_MODEL", "").strip()
+ONLINE_RESEARCH_MODEL = os.getenv("ONLINE_RESEARCH_MODEL", "gpt-4o-mini-search-preview")
 SYSTEM_PROMPT_TEXT = load_system_prompt()
 
 if not ONE_API_TOKEN:
@@ -505,8 +362,60 @@ def remove_urls(text: str) -> str:
     return re.sub(r"https?://\S+", "", text)
 
 
+def call_online_research_model(user_text: str, search_query: str, model_name: str) -> str:
+    if not ONE_API_TOKEN:
+        raise RuntimeError("ONE_API_TOKEN is not configured.")
+
+    endpoint = f"{ONE_API_URL}/chat/completions"
+    today = datetime.now().strftime("%Y-%m-%d")
+    system_prompt = (
+        f"{SYSTEM_PROMPT_TEXT}\n\n"
+        f"今天日期是 {today}。\n"
+        "你是一名支持内置联网搜索的研究助手。\n"
+        "当问题涉及当前、最新、会变化的信息时，请使用模型的联网能力核实后再回答。\n"
+        "请输出简洁中文答案；若证据不足，要明确说明。"
+    )
+    user_prompt = (
+        f"用户请求：{user_text}\n\n"
+        f"建议搜索焦点：{search_query or user_text}\n\n"
+        "请先联网搜索并核实，再给出最终回答。"
+    )
+    payload = {
+        "model": model_name,
+        "temperature": 0.2,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    }
+    headers = {
+        "Authorization": f"Bearer {ONE_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    response = requests.post(endpoint, headers=headers, json=payload, timeout=90)
+    response.raise_for_status()
+    data = response.json()
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError("Online research model returned no choices.")
+    message = choices[0].get("message", {})
+    content = message.get("content", "")
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(item.get("text", ""))
+        content = "\n".join(part for part in parts if part)
+    content = (content or "").strip()
+    if not content:
+        raise RuntimeError("Online research model returned empty content.")
+    return content
+
+
 async def planner_node(state: AgentState, config=None):
-    model_name = get_planner_model_name(config)
+    model_name = PLANNER_MODEL
+    if config and "configurable" in config and config["configurable"].get("planner_model"):
+        model_name = config["configurable"]["planner_model"]
     user_text = get_latest_user_text(state["messages"])
     today = datetime.now().strftime("%Y-%m-%d")
 
@@ -514,21 +423,17 @@ async def planner_node(state: AgentState, config=None):
         return {
             "planner_decision": normalize_planner_decision(PlannerDecision(), user_text),
             "tool_trace": [],
-            "search_result": "",
-            "fetch_result": "",
+            "research_result": "",
         }
 
     planner_prompt = [
         SystemMessage(
             content=(
-                "你是一个负责规划的决策节点。\n"
-                "只返回结构化决策，不要输出额外说明。\n"
-                "当用户请求具备时效性，或者依赖新闻、价格、版本、日期、赛程、政策、天气等可能变化的信息时，选择 route='research'。\n"
-                "当用户请求属于稳定知识、普通写作，或适合直接进入常规工具调用流程时，选择 route='agent'。\n"
-                "如果用户要求在获取当前信息后继续发邮件、汇报或搜索，请在需要调研后继续执行时设置 post_actions=['send_email']。\n"
-                "对于 research，请给出具体搜索词，并将 answer_mode 设为 'grounded_summary'。\n"
-                "当用户提到今天、明天、昨天、后天等相对日期时，请在 search_query 中改写为准确的日历日期。\n"
-                "reason 保持简短，并使用中文。"
+                "你是工作流规划节点，只返回结构化决策。\n"
+                "当请求依赖当前、最新、会变化的信息时，选择 route='research'。\n"
+                "稳定知识、普通写作、可直接继续工具流程时，选择 route='agent'。\n"
+                "如果选择 research，请给出简洁可用的 search_query。\n"
+                "reason 用中文，保持简短。"
             )
         ),
         HumanMessage(
@@ -543,18 +448,9 @@ async def planner_node(state: AgentState, config=None):
         llm = get_llm(model_name).with_structured_output(PlannerDecision)
         raw_decision = await llm.ainvoke(planner_prompt)
     except Exception as exc:
-        fallback_model = get_agent_model_name(config)
-        if fallback_model == model_name:
-            logger.warning("Planner model %s failed, using heuristic fallback: %s", model_name, exc)
-            raw_decision = build_heuristic_planner_decision(user_text)
-        else:
-            logger.warning("Planner model %s failed, falling back to %s: %s", model_name, fallback_model, exc)
-            try:
-                llm = get_llm(fallback_model).with_structured_output(PlannerDecision)
-                raw_decision = await llm.ainvoke(planner_prompt)
-            except Exception as fallback_exc:
-                logger.warning("Planner fallback model %s failed, using heuristic fallback: %s", fallback_model, fallback_exc)
-                raw_decision = build_heuristic_planner_decision(user_text)
+        logger.warning("Planner model %s failed, using heuristic fallback: %s", model_name, exc)
+        raw_decision = build_heuristic_planner_decision(user_text)
+
     decision = normalize_planner_decision(raw_decision, user_text)
     logger.info(
         "Planner route=%s reason=%s query=%s post_actions=%s",
@@ -566,132 +462,41 @@ async def planner_node(state: AgentState, config=None):
     return {
         "planner_decision": decision,
         "tool_trace": [],
-        "search_result": "",
-        "fetch_result": "",
+        "research_result": "",
     }
 
 
 def route_after_planner(state: AgentState):
     decision = state.get("planner_decision") or {}
-    if decision.get("route") != "research" and should_force_research(get_latest_user_text(state["messages"])):
+    if decision.get("route") != "research" and is_time_sensitive(get_latest_user_text(state["messages"])):
         return "research"
     return decision.get("route", "agent")
 
 
-async def search_node(state: AgentState):
-    decision = state.get("planner_decision") or {}
+async def online_research_node(state: AgentState, config=None):
     user_text = get_latest_user_text(state["messages"])
+    decision = state.get("planner_decision") or {}
+    model_name = ONLINE_RESEARCH_MODEL
+    if config and "configurable" in config and config["configurable"].get("online_research_model"):
+        model_name = config["configurable"]["online_research_model"]
+
     query = decision.get("search_query") or build_default_search_query(user_text)
-    queries = build_search_queries(query, user_text)
-    result_sections = []
-    trace_sections = []
-
-    for index, current_query in enumerate(queries, start=1):
-        current_result = web_search(current_query)
-        logger.info("Executed search query %s/%s: %s", index, len(queries), current_query)
-        if len(queries) == 1:
-            result_sections.append(current_result)
-            trace_sections.append(
-                format_trace_content(f"搜索关键词：{current_query}", current_result)
-            )
-            continue
-
-        result_sections.append(
-            f"【搜索 {index}】 {current_query}\n{current_result}"
-        )
-        trace_sections.append(
-            format_trace_content(
-                f"搜索关键词 {index}：{current_query}",
-                current_result,
-            )
-        )
-
-    search_result = "\n\n".join(result_sections)
+    answer = call_online_research_model(user_text, query, model_name)
     trace_entry = {
-        "tool": "web_search",
-        "content": "\n\n".join(trace_sections),
+        "tool": "online_research",
+        "content": format_trace_content(
+            f"联网研究模型：{model_name}\n搜索焦点：{query}",
+            answer,
+        ),
     }
     return {
-        "search_result": search_result,
+        "messages": [AIMessage(content=answer)],
+        "research_result": answer,
         "tool_trace": append_tool_trace(state, [trace_entry]),
     }
 
 
-def route_after_search(state: AgentState):
-    decision = state.get("planner_decision") or {}
-    search_result = state.get("search_result", "")
-    if search_result.startswith("Search failed:") or not extract_urls(search_result):
-        return "grounded_answer"
-    if decision.get("needs_fetch"):
-        return "fetch"
-    return "grounded_answer"
-
-
-async def fetch_node(state: AgentState):
-    decision = state.get("planner_decision") or {}
-    fetch_url = decision.get("fetch_url", "").strip()
-    candidate_urls = [fetch_url] if fetch_url else rank_fetch_urls(extract_urls(state.get("search_result", "")))
-    if not candidate_urls:
-        return {"fetch_result": ""}
-    attempts = []
-    for candidate_url in candidate_urls[:3]:
-        fetch_result = fetch_webpage(candidate_url)
-        attempts.append(candidate_url)
-        if not is_fetch_error(fetch_result):
-            logger.info("Fetched webpage for grounded answer: %s", candidate_url)
-            trace_entry = {
-                "tool": "fetch_webpage",
-                "content": format_trace_content(f"抓取页面：{candidate_url}", fetch_result),
-            }
-            return {
-                "fetch_result": fetch_result,
-                "tool_trace": append_tool_trace(state, [trace_entry]),
-            }
-        logger.warning("Fetch attempt failed for %s: %s", candidate_url, fetch_result)
-    final_fetch_result = f"{fetch_result}\n抓取尝试地址：{', '.join(attempts)}"
-    trace_entry = {
-        "tool": "fetch_webpage",
-        "content": format_trace_content(f"抓取尝试：{', '.join(attempts)}", final_fetch_result),
-    }
-    return {
-        "fetch_result": final_fetch_result,
-        "tool_trace": append_tool_trace(state, [trace_entry]),
-    }
-
-
-async def grounded_answer_node(state: AgentState, config=None):
-    model_name = get_grounded_answer_model_name(config)
-    llm = get_llm(model_name)
-    user_text = get_latest_user_text(state["messages"])
-    today = datetime.now().strftime("%Y-%m-%d")
-    search_result = trim_text(state.get("search_result", ""), 1800)
-    fetch_result = trim_text(state.get("fetch_result", ""), 2200)
-
-    grounded_messages = [
-        SystemMessage(
-            content=(
-                f"{SYSTEM_PROMPT_TEXT}\n\n"
-                f"今天日期是 {today}。\n"
-                "你必须优先依据下面提供的调研证据来回答。\n"
-                "不要用过时记忆去补全缺失事实。\n"
-                "如果证据不足，请明确说明。\n"
-                "如果证据里出现日期，请原样保留。"
-            )
-        ),
-        HumanMessage(
-            content=(
-                f"用户请求：\n{user_text}\n\n"
-                f"搜索结果：\n{search_result}\n\n"
-                f"抓取到的网页内容：\n{fetch_result or '[无]'}\n\n"
-                "请基于以上证据，输出简洁的中文回答。"
-            )
-        ),
-    ]
-    response = await llm.ainvoke(grounded_messages)
-    return {"messages": [response]}
-
-
-def route_after_grounded_answer(state: AgentState):
+def route_after_online_research(state: AgentState):
     decision = state.get("planner_decision") or {}
     if decision.get("post_actions"):
         return "agent"
@@ -699,20 +504,21 @@ def route_after_grounded_answer(state: AgentState):
 
 
 async def agent_node(state: AgentState, config=None):
-    model_name = get_agent_model_name(config)
-    llm = get_llm(model_name)
-    llm_with_tools = llm.bind_tools([web_search, fetch_webpage, send_email])
-    system_prompt = build_runtime_system_prompt()
-    decision = state.get("planner_decision") or {}
-    if decision.get("post_actions") and state.get("search_result"):
-        system_prompt += (
-            "\n\nA grounded research answer already exists in the conversation."
-            " Use that answer as the source of truth for any follow-up actions."
-            " Avoid repeating web_search or fetch_webpage unless the current evidence is clearly insufficient."
-        )
-    system_msg = SystemMessage(content=system_prompt)
-    messages = state["messages"]
+    model_name = AGENT_MODEL
+    if config and "configurable" in config:
+        model_name = config["configurable"].get("model", model_name)
 
+    llm = get_llm(model_name)
+    llm_with_tools = llm.bind_tools([send_email])
+    system_prompt = build_runtime_system_prompt()
+    if state.get("research_result"):
+        system_prompt += (
+            "\n\nA grounded research answer already exists in the conversation. "
+            "Use that answer as the source of truth for any follow-up actions."
+        )
+
+    messages = state["messages"]
+    system_msg = SystemMessage(content=system_prompt)
     if not messages or not isinstance(messages[0], SystemMessage):
         messages = [system_msg] + messages
     else:
@@ -734,27 +540,19 @@ async def lifespan(app: FastAPI):
     async with AsyncRedisSaver.from_conn_string(REDIS_URL) as checkpointer:
         workflow = StateGraph(AgentState)
         workflow.add_node("planner", planner_node)
-        workflow.add_node("search", search_node)
-        workflow.add_node("fetch", fetch_node)
-        workflow.add_node("grounded_answer", grounded_answer_node)
+        workflow.add_node("online_research", online_research_node)
         workflow.add_node("agent", agent_node)
-        workflow.add_node("tools", ToolNode([web_search, fetch_webpage, send_email]))
+        workflow.add_node("tools", ToolNode([send_email]))
 
         workflow.set_entry_point("planner")
         workflow.add_conditional_edges(
             "planner",
             route_after_planner,
-            {"research": "search", "agent": "agent"},
+            {"research": "online_research", "agent": "agent"},
         )
         workflow.add_conditional_edges(
-            "search",
-            route_after_search,
-            {"fetch": "fetch", "grounded_answer": "grounded_answer"},
-        )
-        workflow.add_edge("fetch", "grounded_answer")
-        workflow.add_conditional_edges(
-            "grounded_answer",
-            route_after_grounded_answer,
+            "online_research",
+            route_after_online_research,
             {"agent": "agent", "__end__": "__end__"},
         )
         workflow.add_conditional_edges("agent", should_continue_agent, {"tools": "tools", "__end__": "__end__"})
@@ -787,7 +585,7 @@ async def health():
         "one_api_token_configured": bool(ONE_API_TOKEN),
         "planner_model": PLANNER_MODEL,
         "agent_model": AGENT_MODEL,
-        "grounded_answer_model": GROUNDED_ANSWER_MODEL or AGENT_MODEL,
+        "online_research_model": ONLINE_RESEARCH_MODEL,
         "smtp_configured": smtp_is_configured(),
     }
 
@@ -819,16 +617,16 @@ async def chat(request: Request):
         thread_id = str(uuid.uuid4())
         new_thread = True
 
-    model = data.get("model", "gpt-4o")
+    model = data.get("model", AGENT_MODEL)
     planner_model = data.get("planner_model", PLANNER_MODEL)
-    grounded_model = data.get("grounded_model", GROUNDED_ANSWER_MODEL or model)
+    online_research_model = data.get("online_research_model", ONLINE_RESEARCH_MODEL)
     include_tool_trace = bool(data.get("include_tool_trace"))
     config = {
         "configurable": {
             "thread_id": thread_id,
             "model": model,
             "planner_model": planner_model,
-            "grounded_model": grounded_model,
+            "online_research_model": online_research_model,
         }
     }
 

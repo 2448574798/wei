@@ -169,6 +169,7 @@
                 web_search: "联网搜索",
                 fetch_webpage: "抓取网页",
                 send_email: "发送邮件",
+                online_research: "联网研究",
             };
             return map[name] || name || "工具";
         }
@@ -264,10 +265,6 @@
                         <div class="kv">
                             <strong>模式</strong>
                             <div>${escapeHtml(answerModeLabel(planner.answer_mode))}</div>
-                        </div>
-                        <div class="kv">
-                            <strong>是否抓取网页</strong>
-                            <div>${planner.needs_fetch ? "是" : "否"}</div>
                         </div>
                         <div class="kv">
                             <strong>后续动作</strong>
