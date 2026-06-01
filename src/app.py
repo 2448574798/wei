@@ -324,6 +324,12 @@ def build_tool_trace(messages: list) -> list[dict]:
     return trace
 
 
+def append_tool_trace(state: AgentState, entries: list[dict]) -> list[dict]:
+    existing = list(state.get("tool_trace") or [])
+    existing.extend(entries)
+    return existing
+
+
 load_dotenv(BASE_DIR / ".env")
 logger = configure_logger()
 
@@ -385,7 +391,12 @@ async def planner_node(state: AgentState, config=None):
     today = datetime.now().strftime("%Y-%m-%d")
 
     if not user_text:
-        return {"planner_decision": normalize_planner_decision(PlannerDecision(), user_text)}
+        return {
+            "planner_decision": normalize_planner_decision(PlannerDecision(), user_text),
+            "tool_trace": [],
+            "search_result": "",
+            "fetch_result": "",
+        }
 
     planner_prompt = [
         SystemMessage(
@@ -432,7 +443,12 @@ async def planner_node(state: AgentState, config=None):
         decision["search_query"],
         decision["post_actions"],
     )
-    return {"planner_decision": decision}
+    return {
+        "planner_decision": decision,
+        "tool_trace": [],
+        "search_result": "",
+        "fetch_result": "",
+    }
 
 
 def route_after_planner(state: AgentState):
@@ -448,7 +464,14 @@ async def search_node(state: AgentState):
     query = decision.get("search_query") or build_default_search_query(user_text)
     search_result = web_search(query)
     logger.info("Executed search query: %s", query)
-    return {"search_result": search_result}
+    trace_entry = {
+        "tool": "web_search",
+        "content": trim_text(f"Query: {query}\n\n{search_result}", 400),
+    }
+    return {
+        "search_result": search_result,
+        "tool_trace": append_tool_trace(state, [trace_entry]),
+    }
 
 
 def route_after_search(state: AgentState):
@@ -473,9 +496,24 @@ async def fetch_node(state: AgentState):
         attempts.append(candidate_url)
         if not is_fetch_error(fetch_result):
             logger.info("Fetched webpage for grounded answer: %s", candidate_url)
-            return {"fetch_result": fetch_result}
+            trace_entry = {
+                "tool": "fetch_webpage",
+                "content": trim_text(f"URL: {candidate_url}\n\n{fetch_result}", 400),
+            }
+            return {
+                "fetch_result": fetch_result,
+                "tool_trace": append_tool_trace(state, [trace_entry]),
+            }
         logger.warning("Fetch attempt failed for %s: %s", candidate_url, fetch_result)
-    return {"fetch_result": f"{fetch_result}\nTried URLs: {', '.join(attempts)}"}
+    final_fetch_result = f"{fetch_result}\nTried URLs: {', '.join(attempts)}"
+    trace_entry = {
+        "tool": "fetch_webpage",
+        "content": trim_text(f"URL attempts: {', '.join(attempts)}\n\n{final_fetch_result}", 400),
+    }
+    return {
+        "fetch_result": final_fetch_result,
+        "tool_trace": append_tool_trace(state, [trace_entry]),
+    }
 
 
 async def grounded_answer_node(state: AgentState, config=None):
@@ -667,7 +705,7 @@ async def chat(request: Request):
             "planner_decision": result.get("planner_decision", {}),
         }
         if include_tool_trace:
-            response["tool_trace"] = build_tool_trace(result["messages"])
+            response["tool_trace"] = (result.get("tool_trace") or []) + build_tool_trace(result["messages"])
         if new_thread:
             response["new_thread"] = True
         return JSONResponse(content=response)
