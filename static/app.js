@@ -173,6 +173,13 @@
             return map[name] || name || "工具";
         }
 
+        function actionLabel(name) {
+            const map = {
+                send_email: "发送邮件",
+            };
+            return map[name] || name || "无";
+        }
+
         function formatToolTraceContent(content) {
             const text = String(content || "").trim();
             if (!text) return "-";
@@ -222,7 +229,9 @@
                 const content = document.createElement("div");
                 content.className = "trace-content";
 
-                const actions = planner.post_actions?.length ? planner.post_actions.join(", ") : "无";
+                const actions = planner.post_actions?.length
+                    ? planner.post_actions.map((item) => actionLabel(item)).join("、")
+                    : "无";
                 content.innerHTML = `
                     <div class="kv-grid">
                         <div class="kv">

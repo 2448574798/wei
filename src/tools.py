@@ -78,7 +78,11 @@ def fetch_webpage(url: str) -> str:
     try:
         response = requests.get(url, headers=REQUEST_HEADERS, timeout=15)
         response.raise_for_status()
-        if response.encoding is None:
+        apparent = (response.apparent_encoding or "").strip()
+        declared = (response.encoding or "").strip()
+        if apparent:
+            response.encoding = apparent
+        elif not declared:
             response.encoding = "utf-8"
 
         soup = BeautifulSoup(response.text, "html.parser")
