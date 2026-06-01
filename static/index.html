@@ -85,7 +85,12 @@
             <footer class="composer">
                 <div class="input-box">
                     <textarea id="prompt" rows="1" placeholder="说说你的想法"></textarea>
-                    <button class="send-btn" id="sendBtn" title="发送">↗</button>
+                    <button class="send-btn" id="sendBtn" title="发送" aria-label="发送">
+                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                            <path d="M12 19V7" />
+                            <path d="M7.5 11.5L12 7l4.5 4.5" />
+                        </svg>
+                    </button>
                 </div>
 
                 <div class="composer-footer">

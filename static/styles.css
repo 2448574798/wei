@@ -684,12 +684,25 @@
             width: 46px;
             height: 46px;
             min-width: 46px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             border: none;
             border-radius: 50%;
             background: var(--user);
             color: #fff;
             cursor: pointer;
             box-shadow: 0 12px 22px rgba(37, 99, 235, 0.24);
+        }
+
+        .send-btn svg {
+            width: 18px;
+            height: 18px;
+            stroke: currentColor;
+            stroke-width: 2.2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            fill: none;
         }
 
         .send-btn:disabled {
