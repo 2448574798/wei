@@ -173,6 +173,21 @@
             return map[name] || name || "工具";
         }
 
+        function formatToolTraceContent(content) {
+            const text = String(content || "").trim();
+            if (!text) return "-";
+
+            return text
+                .replace(/^Query:\s*/gm, "搜索关键词：")
+                .replace(/^URL:\s*/gm, "页面地址：")
+                .replace(/^URL attempts:\s*/gm, "抓取尝试：")
+                .replace(/^Tried URLs:\s*/gm, "已尝试地址：")
+                .replace(/^Search failed:\s*/gm, "搜索失败：")
+                .replace(/^Fetch failed:\s*/gm, "抓取失败：")
+                .replace(/^Email is not configured\./gm, "邮件功能尚未配置。")
+                .replace(/^Set SMTP_USER and SMTP_PASSWORD\./gm, "请先配置 SMTP_USER 和 SMTP_PASSWORD。");
+        }
+
         function copyText(text, buttonEl) {
             navigator.clipboard.writeText(text).then(() => {
                 const prev = buttonEl.textContent;
@@ -261,7 +276,7 @@
                     block.className = "kv";
                     block.innerHTML = `
                         <strong>步骤 ${index + 1} · ${escapeHtml(toolLabel(item.tool))}</strong>
-                        <pre class="trace-pre">${escapeHtml(item.content || "-")}</pre>
+                        <pre class="trace-pre">${escapeHtml(formatToolTraceContent(item.content || "-"))}</pre>
                     `;
                     content.appendChild(block);
                 });

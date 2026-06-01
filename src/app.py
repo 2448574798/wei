@@ -330,6 +330,10 @@ def append_tool_trace(state: AgentState, entries: list[dict]) -> list[dict]:
     return existing
 
 
+def format_trace_content(title: str, body: str) -> str:
+    return trim_text(f"{title}\n\n{body}", 400)
+
+
 load_dotenv(BASE_DIR / ".env")
 logger = configure_logger()
 
@@ -466,7 +470,7 @@ async def search_node(state: AgentState):
     logger.info("Executed search query: %s", query)
     trace_entry = {
         "tool": "web_search",
-        "content": trim_text(f"Query: {query}\n\n{search_result}", 400),
+        "content": format_trace_content(f"搜索关键词：{query}", search_result),
     }
     return {
         "search_result": search_result,
@@ -498,7 +502,7 @@ async def fetch_node(state: AgentState):
             logger.info("Fetched webpage for grounded answer: %s", candidate_url)
             trace_entry = {
                 "tool": "fetch_webpage",
-                "content": trim_text(f"URL: {candidate_url}\n\n{fetch_result}", 400),
+                "content": format_trace_content(f"抓取页面：{candidate_url}", fetch_result),
             }
             return {
                 "fetch_result": fetch_result,
@@ -508,7 +512,7 @@ async def fetch_node(state: AgentState):
     final_fetch_result = f"{fetch_result}\nTried URLs: {', '.join(attempts)}"
     trace_entry = {
         "tool": "fetch_webpage",
-        "content": trim_text(f"URL attempts: {', '.join(attempts)}\n\n{final_fetch_result}", 400),
+        "content": format_trace_content(f"抓取尝试：{', '.join(attempts)}", final_fetch_result),
     }
     return {
         "fetch_result": final_fetch_result,
