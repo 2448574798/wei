@@ -29,17 +29,20 @@ SRC_DIR = Path(__file__).resolve().parent
 BASE_DIR = SRC_DIR.parent
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 TIME_SENSITIVE_PATTERN = re.compile(
-    r"(今天|昨日|昨天|明天|现在|当前|目前|最新|最近|刚刚|实时|近况|行情|价格|汇率|股价|新闻|天气|"
-    r"版本|更新|发布|API|SDK|模型|文档|政策|法规|公告|比赛|赛程|票房|销量|"
-    r"today|now|current|latest|recent|price|weather|news|version|release|api|sdk|model)",
+    "(\u4eca\u5929|\u6628\u65e5|\u6628\u5929|\u660e\u5929|\u73b0\u5728|\u5f53\u524d|\u76ee\u524d|\u6700\u65b0|\u6700\u8fd1|\u521a\u521a|\u5b9e\u65f6|\u8fd1\u51b5|\u884c\u60c5|\u4ef7\u683c|\u6c47\u7387|\u80a1\u4ef7|\u65b0\u95fb|\u5929\u6c14|"
+    "\u7248\u672c|\u66f4\u65b0|\u53d1\u5e03|API|SDK|\u6a21\u578b|\u6587\u6863|\u653f\u7b56|\u6cd5\u89c4|\u516c\u544a|\u6bd4\u8d5b|\u8d5b\u7a0b|\u7968\u623f|\u9500\u91cf|"
+    "today|now|current|latest|recent|price|weather|news|version|release|api|sdk|model)",
     re.IGNORECASE,
 )
 SEARCH_URL_PATTERN = re.compile(r"^URL:\s*(\S+)$", re.MULTILINE)
 EMAIL_ACTION_PATTERN = re.compile(
-    r"(发送到|发送给|发到|发给|发送|发邮件|邮件|邮箱|email|mail)",
+    "(\u53d1\u9001\u5230|\u53d1\u9001\u7ed9|\u53d1\u5230|\u53d1\u7ed9|\u53d1\u9001|\u53d1\u90ae\u4ef6|\u90ae\u4ef6|\u90ae\u7bb1|email|mail)",
     re.IGNORECASE,
 )
-SEARCH_ACTION_PATTERN = re.compile(r"(搜索|搜一下|查询|查一下|联网|网页|网站|fetch|search|browse|look up)", re.IGNORECASE)
+SEARCH_ACTION_PATTERN = re.compile(
+    "(\u641c\u7d22|\u641c\u4e00\u4e2a|\u67e5\u8be2|\u67e5\u4e00\u4e2a|\u8054\u7f51|\u7f51\u9875|\u7f51\u7ad9|fetch|search|browse|look up)",
+    re.IGNORECASE,
+)
 NON_FETCH_FRIENDLY_DOMAINS = {
     "help.openai.com",
     "support.google.com",
@@ -210,32 +213,32 @@ def localize_planner_reason(reason: str, route: str, user_text: str, post_action
 
     if not text:
         if route == "research":
-            return "用户请求涉及时效性或需要联网核实的信息。"
+            return "\u7528\u6237\u8bf7\u6c42\u6d89\u53ca\u65f6\u6548\u6027\u6216\u9700\u8981\u8054\u7f51\u6838\u5b9e\u7684\u4fe1\u606f\u3002"
         if route == "agent":
-            return "用户请求更适合直接进入常规执行流程。"
-        return "已根据当前请求选择执行路径。"
+            return "\u7528\u6237\u8bf7\u6c42\u66f4\u9002\u5408\u76f4\u63a5\u8fdb\u5165\u5e38\u89c4\u6267\u884c\u6d41\u7a0b\u3002"
+        return "\u5df2\u6839\u636e\u5f53\u524d\u8bf7\u6c42\u9009\u62e9\u6267\u884c\u8def\u5f84\u3002"
 
     lowered = text.lower()
 
     if "heuristic fallback route" in lowered:
-        return "模型规划不可用，已使用本地规则选择执行路径。"
+        return "\u6a21\u578b\u89c4\u5212\u4e0d\u53ef\u7528\uff0c\u5df2\u4f7f\u7528\u672c\u5730\u89c4\u5219\u9009\u62e9\u6267\u884c\u8def\u5f84\u3002"
     if "matched time-sensitive heuristic" in lowered:
-        return "命中了时效性规则，因此优先走调研路径。"
+        return "\u547d\u4e2d\u4e86\u65f6\u6548\u6027\u89c4\u5219\uff0c\u56e0\u6b64\u4f18\u5148\u8d70\u8c03\u7814\u8def\u5f84\u3002"
     if "research is required before completing follow-up actions" in lowered:
-        return "需要先完成调研，再继续执行后续动作。"
+        return "\u9700\u8981\u5148\u5b8c\u6210\u8c03\u7814\uff0c\u518d\u7ee7\u7eed\u6267\u884c\u540e\u7eed\u52a8\u4f5c\u3002"
     if "time-sensitive" in lowered or "current" in lowered or "latest" in lowered or "recent" in lowered:
-        return "用户请求涉及时效性或最新信息，适合先调研再回答。"
+        return "\u7528\u6237\u8bf7\u6c42\u6d89\u53ca\u65f6\u6548\u6027\u6216\u6700\u65b0\u4fe1\u606f\uff0c\u9002\u5408\u5148\u8c03\u7814\u518d\u56de\u7b54\u3002"
     if "stable knowledge" in lowered or "does not require current information" in lowered:
-        return "用户请求更偏稳定知识，不需要先联网调研。"
+        return "\u7528\u6237\u8bf7\u6c42\u66f4\u504f\u7a33\u5b9a\u77e5\u8bc6\uff0c\u4e0d\u9700\u8981\u5148\u8054\u7f51\u8c03\u7814\u3002"
     if "email" in lowered and post_actions:
-        return "需要先整理信息，再继续执行邮件等后续动作。"
+        return "\u9700\u8981\u5148\u6574\u7406\u4fe1\u606f\uff0c\u518d\u7ee7\u7eed\u6267\u884c\u90ae\u4ef6\u7b49\u540e\u7eed\u52a8\u4f5c\u3002"
     if "search" in lowered and route == "research":
-        return "这个请求需要先搜索和核实资料。"
+        return "\u8fd9\u4e2a\u8bf7\u6c42\u9700\u8981\u5148\u641c\u7d22\u548c\u6838\u5b9e\u8d44\u6599\u3002"
 
     if route == "research":
-        return "已判断这个请求更适合先调研，再基于结果回答。"
+        return "\u5df2\u5224\u65ad\u8fd9\u4e2a\u8bf7\u6c42\u66f4\u9002\u5408\u5148\u8c03\u7814\uff0c\u518d\u57fa\u4e8e\u7ed3\u679c\u56de\u7b54\u3002"
     if route == "agent":
-        return "已判断这个请求可以直接进入常规执行流程。"
+        return "\u5df2\u5224\u65ad\u8fd9\u4e2a\u8bf7\u6c42\u53ef\u4ee5\u76f4\u63a5\u8fdb\u5165\u5e38\u89c4\u6267\u884c\u6d41\u7a0b\u3002"
     return text
 
 
@@ -470,7 +473,7 @@ async def search_node(state: AgentState):
     logger.info("Executed search query: %s", query)
     trace_entry = {
         "tool": "web_search",
-        "content": format_trace_content(f"搜索关键词：{query}", search_result),
+        "content": format_trace_content(f"\u641c\u7d22\u5173\u952e\u8bcd\uff1a{query}", search_result),
     }
     return {
         "search_result": search_result,
@@ -502,7 +505,7 @@ async def fetch_node(state: AgentState):
             logger.info("Fetched webpage for grounded answer: %s", candidate_url)
             trace_entry = {
                 "tool": "fetch_webpage",
-                "content": format_trace_content(f"抓取页面：{candidate_url}", fetch_result),
+                "content": format_trace_content(f"\u6293\u53d6\u9875\u9762\uff1a{candidate_url}", fetch_result),
             }
             return {
                 "fetch_result": fetch_result,
@@ -512,7 +515,7 @@ async def fetch_node(state: AgentState):
     final_fetch_result = f"{fetch_result}\nTried URLs: {', '.join(attempts)}"
     trace_entry = {
         "tool": "fetch_webpage",
-        "content": format_trace_content(f"抓取尝试：{', '.join(attempts)}", final_fetch_result),
+        "content": format_trace_content(f"\u6293\u53d6\u5c1d\u8bd5\uff1a{', '.join(attempts)}", final_fetch_result),
     }
     return {
         "fetch_result": final_fetch_result,
