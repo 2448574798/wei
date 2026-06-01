@@ -373,18 +373,26 @@
             line-height: 1.7;
         }
 
-        .message {
-            max-width: min(62%, 520px);
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-            animation: rise 0.18s ease;
-        }
+.message {
+    max-width: min(62%, 520px);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    animation: rise 0.18s ease;
+}
 
-        .message-main {
-            width: fit-content;
-            max-width: 100%;
-            display: flex;
+.message.assistant.has-trace {
+    max-width: min(92%, 980px);
+    display: grid;
+    grid-template-columns: minmax(240px, max-content) minmax(260px, 320px);
+    align-items: start;
+    gap: 12px;
+}
+
+.message-main {
+    width: fit-content;
+    max-width: 100%;
+    display: flex;
             flex-direction: column;
             gap: 8px;
         }
@@ -416,14 +424,15 @@
             }
         }
 
-        .bubble {
-            border-radius: 24px;
-            padding: 9px 11px;
-            font-size: 14px;
-            line-height: 1.68;
-            word-break: break-word;
-            white-space: pre-wrap;
-        }
+.bubble {
+    border-radius: 24px;
+    padding: 9px 11px;
+    min-width: 88px;
+    font-size: 15px;
+    line-height: 1.72;
+    word-break: break-word;
+    white-space: pre-wrap;
+}
 
         .message.user .bubble {
             background: var(--user);
@@ -437,12 +446,12 @@
             border-bottom-left-radius: 8px;
         }
 
-        .message-meta {
-            color: var(--muted);
-            font-size: 12px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
+.message-meta {
+    color: var(--muted);
+    font-size: 12.5px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
             flex-wrap: wrap;
             padding: 0 4px;
         }
@@ -460,11 +469,11 @@
             color: var(--primary);
         }
 
-        .trace-stack {
-            display: grid;
-            gap: 10px;
-            width: min(100%, 520px);
-        }
+.trace-stack {
+    display: grid;
+    gap: 10px;
+    width: 100%;
+}
 
         .trace-card {
             background: var(--panel-solid);
@@ -473,7 +482,7 @@
             overflow: hidden;
         }
 
-        .trace-card summary {
+.trace-card summary {
             list-style: none;
             cursor: pointer;
             display: flex;
@@ -481,9 +490,9 @@
             justify-content: space-between;
             gap: 12px;
             padding: 12px 14px;
-            font-size: 13px;
-            font-weight: 700;
-        }
+    font-size: 13.5px;
+    font-weight: 700;
+}
 
         .trace-card summary::-webkit-details-marker {
             display: none;
@@ -566,13 +575,13 @@
             margin-bottom: 5px;
         }
 
-        .trace-pre {
-            margin: 0;
-            font-family: var(--mono);
-            font-size: 12px;
-            line-height: 1.65;
-            white-space: pre-wrap;
-            word-break: break-word;
+.trace-pre {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    word-break: break-word;
         }
 
         .composer {
@@ -773,18 +782,24 @@
                 padding: 14px 12px 8px;
             }
 
-            .message {
-                max-width: 82%;
-            }
+    .message {
+        max-width: 82%;
+    }
 
-            .message-main {
-                gap: 7px;
-            }
+    .message.assistant.has-trace {
+        max-width: 92%;
+        grid-template-columns: 1fr;
+    }
 
-            .bubble {
-                font-size: 13.5px;
-                padding: 8px 10px;
-            }
+    .message-main {
+        gap: 7px;
+    }
+
+    .bubble {
+        min-width: 76px;
+        font-size: 14px;
+        padding: 8px 10px;
+    }
 
             .trace-stack {
                 width: 100%;

@@ -275,18 +275,13 @@ const messagesEl = document.getElementById("messages");
             return stack;
         }
 
-        function addMessage(role, content, options = {}) {
-            const { save = true, time = nowTime(), meta = null } = options;
-            const wrapper = document.createElement("div");
-            wrapper.className = `message ${role}`;
+function addMessage(role, content, options = {}) {
+    const { save = true, time = nowTime(), meta = null } = options;
+    const wrapper = document.createElement("div");
+    wrapper.className = `message ${role}`;
 
-            const traceBlock = createTraceBlock(meta);
-            if (traceBlock) {
-                wrapper.appendChild(traceBlock);
-            }
-
-            const main = document.createElement("div");
-            main.className = "message-main";
+    const main = document.createElement("div");
+    main.className = "message-main";
 
             const bubble = document.createElement("div");
             bubble.className = "bubble";
@@ -304,11 +299,17 @@ const messagesEl = document.getElementById("messages");
             copyBtn.textContent = "复制";
             copyBtn.addEventListener("click", () => copyText(content, copyBtn));
 
-            metaRow.append(timeEl, copyBtn);
-            main.append(bubble, metaRow);
-            wrapper.appendChild(main);
+    metaRow.append(timeEl, copyBtn);
+    main.append(bubble, metaRow);
+    wrapper.appendChild(main);
 
-            messagesEl.appendChild(wrapper);
+    const traceBlock = createTraceBlock(meta);
+    if (traceBlock) {
+        wrapper.classList.add("has-trace");
+        wrapper.appendChild(traceBlock);
+    }
+
+    messagesEl.appendChild(wrapper);
             messagesEl.scrollTop = messagesEl.scrollHeight;
 
             if (save) {
