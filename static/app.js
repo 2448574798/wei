@@ -180,19 +180,42 @@
             return map[name] || name || "无";
         }
 
-        function formatToolTraceContent(content) {
-            const text = String(content || "").trim();
-            if (!text) return "-";
-
+        function formatSearchTrace(text) {
             return text
                 .replace(/^Query:\s*/gm, "搜索关键词：")
+                .replace(/^Title:\s*/gm, "结果标题：")
+                .replace(/^URL:\s*/gm, "页面地址：")
+                .replace(/^Snippet:\s*/gm, "摘要：")
+                .replace(/^Search failed:\s*/gm, "搜索失败：");
+        }
+
+        function formatFetchTrace(text) {
+            return text
                 .replace(/^URL:\s*/gm, "页面地址：")
                 .replace(/^URL attempts:\s*/gm, "抓取尝试：")
                 .replace(/^Tried URLs:\s*/gm, "已尝试地址：")
-                .replace(/^Search failed:\s*/gm, "搜索失败：")
                 .replace(/^Fetch failed:\s*/gm, "抓取失败：")
+                .replace(/^\[Content truncated\]$/gm, "[内容已截断]")
+                .replace(/^\[Truncated\]$/gm, "[内容已截断]");
+        }
+
+        function formatEmailTrace(text) {
+            return text
                 .replace(/^Email is not configured\./gm, "邮件功能尚未配置。")
-                .replace(/^Set SMTP_USER and SMTP_PASSWORD\./gm, "请先配置 SMTP_USER 和 SMTP_PASSWORD。");
+                .replace(/^Set SMTP_USER and SMTP_PASSWORD\./gm, "请先配置 SMTP_USER 和 SMTP_PASSWORD。")
+                .replace(/^Email sent to\s*/gm, "已发送到：")
+                .replace(/^Email send failed:\s*/gm, "邮件发送失败：");
+        }
+
+        function formatToolTraceContent(content, toolName = "") {
+            const text = String(content || "").trim();
+            if (!text) return "-";
+
+            if (toolName === "web_search") return formatSearchTrace(text);
+            if (toolName === "fetch_webpage") return formatFetchTrace(text);
+            if (toolName === "send_email") return formatEmailTrace(text);
+
+            return formatEmailTrace(formatFetchTrace(formatSearchTrace(text)));
         }
 
         function copyText(text, buttonEl) {
@@ -285,7 +308,7 @@
                     block.className = "kv";
                     block.innerHTML = `
                         <strong>步骤 ${index + 1} · ${escapeHtml(toolLabel(item.tool))}</strong>
-                        <pre class="trace-pre">${escapeHtml(formatToolTraceContent(item.content || "-"))}</pre>
+                        <pre class="trace-pre">${escapeHtml(formatToolTraceContent(item.content || "-", item.tool || ""))}</pre>
                     `;
                     content.appendChild(block);
                 });

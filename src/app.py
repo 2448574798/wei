@@ -3,7 +3,7 @@ import os
 import re
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Literal
@@ -29,18 +29,18 @@ SRC_DIR = Path(__file__).resolve().parent
 BASE_DIR = SRC_DIR.parent
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 TIME_SENSITIVE_PATTERN = re.compile(
-    "(\u4eca\u5929|\u6628\u65e5|\u6628\u5929|\u660e\u5929|\u73b0\u5728|\u5f53\u524d|\u76ee\u524d|\u6700\u65b0|\u6700\u8fd1|\u521a\u521a|\u5b9e\u65f6|\u8fd1\u51b5|\u884c\u60c5|\u4ef7\u683c|\u6c47\u7387|\u80a1\u4ef7|\u65b0\u95fb|\u5929\u6c14|"
-    "\u7248\u672c|\u66f4\u65b0|\u53d1\u5e03|API|SDK|\u6a21\u578b|\u6587\u6863|\u653f\u7b56|\u6cd5\u89c4|\u516c\u544a|\u6bd4\u8d5b|\u8d5b\u7a0b|\u7968\u623f|\u9500\u91cf|"
+    "(今天|昨日|昨天|明天|现在|当前|目前|最新|最近|刚刚|实时|近况|行情|价格|汇率|股价|新闻|天气|"
+    "版本|更新|发布|API|SDK|模型|文档|政策|法规|公告|比赛|赛程|票房|销量|"
     "today|now|current|latest|recent|price|weather|news|version|release|api|sdk|model)",
     re.IGNORECASE,
 )
 SEARCH_URL_PATTERN = re.compile(r"^URL:\s*(\S+)$", re.MULTILINE)
 EMAIL_ACTION_PATTERN = re.compile(
-    "(\u53d1\u9001\u5230|\u53d1\u9001\u7ed9|\u53d1\u5230|\u53d1\u7ed9|\u53d1\u9001|\u53d1\u90ae\u4ef6|\u90ae\u4ef6|\u90ae\u7bb1|email|mail)",
+    "(发送到|发送给|发到|发给|发送|发邮件|邮件|邮箱|email|mail)",
     re.IGNORECASE,
 )
 SEARCH_ACTION_PATTERN = re.compile(
-    "(\u641c\u7d22|\u641c\u4e00\u4e2a|\u67e5\u8be2|\u67e5\u4e00\u4e2a|\u8054\u7f51|\u7f51\u9875|\u7f51\u7ad9|fetch|search|browse|look up)",
+    "(搜索|搜一个|查询|查一个|联网|网页|网站|fetch|search|browse|look up)",
     re.IGNORECASE,
 )
 NON_FETCH_FRIENDLY_DOMAINS = {
@@ -143,12 +143,45 @@ def get_latest_user_text(messages: list) -> str:
 def build_runtime_system_prompt() -> str:
     today = datetime.now().strftime("%Y-%m-%d")
     policy = (
-        f"Today is {today}.\n"
-        "If a request depends on current, recent, versioned, scheduled, or otherwise changeable facts, "
-        "prefer tool evidence over memory.\n"
-        "If evidence is insufficient, clearly say it cannot be confirmed."
+        f"今天日期是 {today}。\n"
+        "如果请求依赖当前、最近、带版本、带日期、带赛程，或其他可能变化的信息，"
+        "优先依赖工具证据而不是模型记忆。\n"
+        "如果证据不足，请明确说明无法确认。"
     )
     return f"{SYSTEM_PROMPT_TEXT}\n\n{policy}"
+
+
+def format_cn_date(value: datetime) -> str:
+    return f"{value.year}年{value.month}月{value.day}日"
+
+
+def expand_relative_dates(text: str) -> str:
+    if not text:
+        return text
+
+    now = datetime.now()
+    replacements = [
+        (r"今天|今日", format_cn_date(now)),
+        (r"明天", format_cn_date(now + timedelta(days=1))),
+        (r"后天", format_cn_date(now + timedelta(days=2))),
+        (r"昨天|昨日", format_cn_date(now - timedelta(days=1))),
+        (r"\btoday\b", now.strftime("%Y-%m-%d")),
+        (r"\btomorrow\b", (now + timedelta(days=1)).strftime("%Y-%m-%d")),
+        (r"\byesterday\b", (now - timedelta(days=1)).strftime("%Y-%m-%d")),
+    ]
+
+    expanded = text
+    for pattern, replacement in replacements:
+        expanded = re.sub(pattern, replacement, expanded, flags=re.IGNORECASE)
+    return expanded
+
+
+def has_explicit_date(text: str) -> bool:
+    return bool(re.search(r"\d{4}[-/.年]\d{1,2}([-/\.月]\d{1,2})?", text))
+
+
+def has_relative_date(text: str) -> bool:
+    return bool(re.search(r"今天|今日|明天|后天|昨天|昨日|\btoday\b|\btomorrow\b|\byesterday\b", text, re.IGNORECASE))
 
 
 def build_default_search_query(user_text: str) -> str:
@@ -158,7 +191,87 @@ def build_default_search_query(user_text: str) -> str:
     normalized = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "", user_text)
     normalized = EMAIL_ACTION_PATTERN.sub(" ", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
-    return f"{normalized or user_text} {today}"
+    normalized = expand_relative_dates(normalized or user_text)
+    if has_explicit_date(normalized):
+        return normalized
+    return f"{normalized} {today}"
+
+
+def normalize_search_query(query: str, user_text: str) -> str:
+    if has_relative_date(user_text):
+        return build_default_search_query(user_text)
+
+    cleaned = (query or "").strip()
+    if not cleaned:
+        return build_default_search_query(user_text)
+
+    cleaned = expand_relative_dates(cleaned)
+    return cleaned
+
+
+def is_weather_query(text: str) -> bool:
+    return bool(
+        re.search(
+            r"天气|气温|降雨|预报|气象|weather|forecast|temperature|rain",
+            text or "",
+            re.IGNORECASE,
+        )
+    )
+
+
+def extract_date_tokens(text: str) -> list[str]:
+    if not text:
+        return []
+
+    patterns = [
+        r"\d{4}年\d{1,2}月\d{1,2}日",
+        r"\d{4}-\d{1,2}-\d{1,2}",
+        r"\d{4}/\d{1,2}/\d{1,2}",
+        r"\d{4}\.\d{1,2}\.\d{1,2}",
+    ]
+
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for pattern in patterns:
+        for match in re.findall(pattern, text):
+            if match not in seen:
+                seen.add(match)
+                tokens.append(match)
+    return tokens
+
+
+def strip_date_tokens(text: str) -> str:
+    cleaned = text or ""
+    cleaned = re.sub(r"\d{4}年\d{1,2}月\d{1,2}日", " ", cleaned)
+    cleaned = re.sub(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}", " ", cleaned)
+    cleaned = re.sub(r"(和|与|以及|及|and|to|through|between)", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"[，,、]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def build_search_queries(query: str, user_text: str) -> list[str]:
+    normalized_query = normalize_search_query(query, user_text)
+    if not is_weather_query(user_text):
+        return [normalized_query]
+
+    expanded_user_text = expand_relative_dates(user_text)
+    date_tokens = extract_date_tokens(normalized_query)
+    if len(date_tokens) < 2:
+        user_dates = extract_date_tokens(expanded_user_text)
+        if len(user_dates) > len(date_tokens):
+            date_tokens = user_dates
+
+    if len(date_tokens) < 2:
+        return [normalized_query]
+
+    topic = strip_date_tokens(expanded_user_text)
+    if not topic:
+        topic = strip_date_tokens(normalized_query)
+    if not topic:
+        return [normalized_query]
+
+    return [f"{date_token} {topic}".strip() for date_token in date_tokens]
 
 
 def extract_urls(search_result: str) -> list[str]:
@@ -213,32 +326,32 @@ def localize_planner_reason(reason: str, route: str, user_text: str, post_action
 
     if not text:
         if route == "research":
-            return "\u7528\u6237\u8bf7\u6c42\u6d89\u53ca\u65f6\u6548\u6027\u6216\u9700\u8981\u8054\u7f51\u6838\u5b9e\u7684\u4fe1\u606f\u3002"
+            return "用户请求涉及时效性或需要联网核实的信息。"
         if route == "agent":
-            return "\u7528\u6237\u8bf7\u6c42\u66f4\u9002\u5408\u76f4\u63a5\u8fdb\u5165\u5e38\u89c4\u6267\u884c\u6d41\u7a0b\u3002"
-        return "\u5df2\u6839\u636e\u5f53\u524d\u8bf7\u6c42\u9009\u62e9\u6267\u884c\u8def\u5f84\u3002"
+            return "用户请求更适合直接进入常规执行流程。"
+        return "已根据当前请求选择执行路径。"
 
     lowered = text.lower()
 
     if "heuristic fallback route" in lowered:
-        return "\u6a21\u578b\u89c4\u5212\u4e0d\u53ef\u7528\uff0c\u5df2\u4f7f\u7528\u672c\u5730\u89c4\u5219\u9009\u62e9\u6267\u884c\u8def\u5f84\u3002"
+        return "模型规划不可用，已使用本地规则选择执行路径。"
     if "matched time-sensitive heuristic" in lowered:
-        return "\u547d\u4e2d\u4e86\u65f6\u6548\u6027\u89c4\u5219\uff0c\u56e0\u6b64\u4f18\u5148\u8d70\u8c03\u7814\u8def\u5f84\u3002"
+        return "命中了时效性规则，因此优先走调研路径。"
     if "research is required before completing follow-up actions" in lowered:
-        return "\u9700\u8981\u5148\u5b8c\u6210\u8c03\u7814\uff0c\u518d\u7ee7\u7eed\u6267\u884c\u540e\u7eed\u52a8\u4f5c\u3002"
+        return "需要先完成调研，再继续执行后续动作。"
     if "time-sensitive" in lowered or "current" in lowered or "latest" in lowered or "recent" in lowered:
-        return "\u7528\u6237\u8bf7\u6c42\u6d89\u53ca\u65f6\u6548\u6027\u6216\u6700\u65b0\u4fe1\u606f\uff0c\u9002\u5408\u5148\u8c03\u7814\u518d\u56de\u7b54\u3002"
+        return "用户请求涉及时效性或最新信息，适合先调研再回答。"
     if "stable knowledge" in lowered or "does not require current information" in lowered:
-        return "\u7528\u6237\u8bf7\u6c42\u66f4\u504f\u7a33\u5b9a\u77e5\u8bc6\uff0c\u4e0d\u9700\u8981\u5148\u8054\u7f51\u8c03\u7814\u3002"
+        return "用户请求更偏稳定知识，不需要先联网调研。"
     if "email" in lowered and post_actions:
-        return "\u9700\u8981\u5148\u6574\u7406\u4fe1\u606f\uff0c\u518d\u7ee7\u7eed\u6267\u884c\u90ae\u4ef6\u7b49\u540e\u7eed\u52a8\u4f5c\u3002"
+        return "需要先整理信息，再继续执行邮件等后续动作。"
     if "search" in lowered and route == "research":
-        return "\u8fd9\u4e2a\u8bf7\u6c42\u9700\u8981\u5148\u641c\u7d22\u548c\u6838\u5b9e\u8d44\u6599\u3002"
+        return "这个请求需要先搜索和核实资料。"
 
     if route == "research":
-        return "\u5df2\u5224\u65ad\u8fd9\u4e2a\u8bf7\u6c42\u66f4\u9002\u5408\u5148\u8c03\u7814\uff0c\u518d\u57fa\u4e8e\u7ed3\u679c\u56de\u7b54\u3002"
+        return "已判断这个请求更适合先调研，再基于结果回答。"
     if route == "agent":
-        return "\u5df2\u5224\u65ad\u8fd9\u4e2a\u8bf7\u6c42\u53ef\u4ee5\u76f4\u63a5\u8fdb\u5165\u5e38\u89c4\u6267\u884c\u6d41\u7a0b\u3002"
+        return "已判断这个请求可以直接进入常规执行流程。"
     return text
 
 
@@ -248,26 +361,26 @@ def normalize_planner_decision(decision: PlannerDecision | dict, user_text: str)
     if forced_research:
         data["route"] = "research"
         data["answer_mode"] = "grounded_summary"
-        data["reason"] = data.get("reason") or "Matched time-sensitive heuristic."
-        data["search_query"] = data.get("search_query") or build_default_search_query(user_text)
+        data["reason"] = data.get("reason") or "命中了时效性规则。"
+        data["search_query"] = normalize_search_query(data.get("search_query", ""), user_text)
     if data.get("route") == "research":
-        data["search_query"] = data.get("search_query") or build_default_search_query(user_text)
+        data["search_query"] = normalize_search_query(data.get("search_query", ""), user_text)
     post_actions = list(dict.fromkeys(data.get("post_actions") or infer_post_actions(user_text)))
     data["post_actions"] = post_actions
     if post_actions and data.get("route") != "research" and likely_needs_research(user_text):
         data["route"] = "research"
         data["answer_mode"] = "grounded_summary"
         data["reason"] = (
-            f"{data.get('reason', '').strip()} Research is required before completing follow-up actions."
+            f"{data.get('reason', '').strip()} 需要先完成调研，再继续执行后续动作。"
         ).strip()
-        data["search_query"] = data.get("search_query") or build_default_search_query(user_text)
+        data["search_query"] = normalize_search_query(data.get("search_query", ""), user_text)
     data["reason"] = localize_planner_reason(data.get("reason", ""), data.get("route", "agent"), user_text, post_actions)
     return data
 
 
 def build_heuristic_planner_decision(user_text: str) -> dict:
     route = "research" if likely_needs_research(user_text) else "agent"
-    reason = "Heuristic fallback route."
+    reason = "本地规则兜底路径。"
     return normalize_planner_decision(
         {
             "route": route,
@@ -408,21 +521,21 @@ async def planner_node(state: AgentState, config=None):
     planner_prompt = [
         SystemMessage(
             content=(
-                "You are a planning node for a tool-using assistant.\n"
-                "Return only a structured decision.\n"
-                "Choose route='research' when the request is time-sensitive, asks for latest/current/recent information, "
-                "or depends on news, prices, versions, dates, schedules, policies, weather, or anything likely to change.\n"
-                "Choose route='agent' for stable knowledge, simple writing tasks, or cases where normal tool-calling can continue.\n"
-                "If the user asks to email/search/report after gathering current information, set post_actions=['send_email'] when email sending remains after research.\n"
-                "For research, provide a concrete search query and set answer_mode='grounded_summary'.\n"
-                "Keep reasons short and write the reason in Chinese."
+                "你是一个负责规划的决策节点。\n"
+                "只返回结构化决策，不要输出额外说明。\n"
+                "当用户请求具备时效性，或者依赖新闻、价格、版本、日期、赛程、政策、天气等可能变化的信息时，选择 route='research'。\n"
+                "当用户请求属于稳定知识、普通写作，或适合直接进入常规工具调用流程时，选择 route='agent'。\n"
+                "如果用户要求在获取当前信息后继续发邮件、汇报或搜索，请在需要调研后继续执行时设置 post_actions=['send_email']。\n"
+                "对于 research，请给出具体搜索词，并将 answer_mode 设为 'grounded_summary'。\n"
+                "当用户提到今天、明天、昨天、后天等相对日期时，请在 search_query 中改写为准确的日历日期。\n"
+                "reason 保持简短，并使用中文。"
             )
         ),
         HumanMessage(
             content=(
-                f"Today: {today}\n"
-                f"User request: {user_text}\n"
-                f"Hint: {'time-sensitive' if is_time_sensitive(user_text) else 'not obviously time-sensitive'}"
+                f"今天日期：{today}\n"
+                f"用户请求：{user_text}\n"
+                f"提示：{'这是明显的时效性问题' if is_time_sensitive(user_text) else '这不是明显的时效性问题'}"
             )
         ),
     ]
@@ -469,11 +582,34 @@ async def search_node(state: AgentState):
     decision = state.get("planner_decision") or {}
     user_text = get_latest_user_text(state["messages"])
     query = decision.get("search_query") or build_default_search_query(user_text)
-    search_result = web_search(query)
-    logger.info("Executed search query: %s", query)
+    queries = build_search_queries(query, user_text)
+    result_sections = []
+    trace_sections = []
+
+    for index, current_query in enumerate(queries, start=1):
+        current_result = web_search(current_query)
+        logger.info("Executed search query %s/%s: %s", index, len(queries), current_query)
+        if len(queries) == 1:
+            result_sections.append(current_result)
+            trace_sections.append(
+                format_trace_content(f"搜索关键词：{current_query}", current_result)
+            )
+            continue
+
+        result_sections.append(
+            f"【搜索 {index}】 {current_query}\n{current_result}"
+        )
+        trace_sections.append(
+            format_trace_content(
+                f"搜索关键词 {index}：{current_query}",
+                current_result,
+            )
+        )
+
+    search_result = "\n\n".join(result_sections)
     trace_entry = {
         "tool": "web_search",
-        "content": format_trace_content(f"\u641c\u7d22\u5173\u952e\u8bcd\uff1a{query}", search_result),
+        "content": "\n\n".join(trace_sections),
     }
     return {
         "search_result": search_result,
@@ -505,17 +641,17 @@ async def fetch_node(state: AgentState):
             logger.info("Fetched webpage for grounded answer: %s", candidate_url)
             trace_entry = {
                 "tool": "fetch_webpage",
-                "content": format_trace_content(f"\u6293\u53d6\u9875\u9762\uff1a{candidate_url}", fetch_result),
+                "content": format_trace_content(f"抓取页面：{candidate_url}", fetch_result),
             }
             return {
                 "fetch_result": fetch_result,
                 "tool_trace": append_tool_trace(state, [trace_entry]),
             }
         logger.warning("Fetch attempt failed for %s: %s", candidate_url, fetch_result)
-    final_fetch_result = f"{fetch_result}\nTried URLs: {', '.join(attempts)}"
+    final_fetch_result = f"{fetch_result}\n抓取尝试地址：{', '.join(attempts)}"
     trace_entry = {
         "tool": "fetch_webpage",
-        "content": format_trace_content(f"\u6293\u53d6\u5c1d\u8bd5\uff1a{', '.join(attempts)}", final_fetch_result),
+        "content": format_trace_content(f"抓取尝试：{', '.join(attempts)}", final_fetch_result),
     }
     return {
         "fetch_result": final_fetch_result,
@@ -535,19 +671,19 @@ async def grounded_answer_node(state: AgentState, config=None):
         SystemMessage(
             content=(
                 f"{SYSTEM_PROMPT_TEXT}\n\n"
-                f"Today is {today}.\n"
-                "You must answer using the provided research evidence first.\n"
-                "Do not use stale memory to fill missing facts.\n"
-                "If the evidence is insufficient, explicitly say so.\n"
-                "If dates appear in the evidence, preserve them exactly."
+                f"今天日期是 {today}。\n"
+                "你必须优先依据下面提供的调研证据来回答。\n"
+                "不要用过时记忆去补全缺失事实。\n"
+                "如果证据不足，请明确说明。\n"
+                "如果证据里出现日期，请原样保留。"
             )
         ),
         HumanMessage(
             content=(
-                f"User request:\n{user_text}\n\n"
-                f"Search results:\n{search_result}\n\n"
-                f"Fetched webpage content:\n{fetch_result or '[none]'}\n\n"
-                "Write a concise Chinese answer grounded in the evidence above."
+                f"用户请求：\n{user_text}\n\n"
+                f"搜索结果：\n{search_result}\n\n"
+                f"抓取到的网页内容：\n{fetch_result or '[无]'}\n\n"
+                "请基于以上证据，输出简洁的中文回答。"
             )
         ),
     ]
