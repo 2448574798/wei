@@ -90,31 +90,31 @@
         }
 
         function plannerLabel(route) {
-            if (route === "research") return "璋冪爺";
-            if (route === "agent") return "鎵ц";
-            return "鏈煡";
+            if (route === "research") return "调研";
+            if (route === "agent") return "执行";
+            return "未知";
         }
 
         function getModelMeta(value) {
             const map = {
                 "gpt-4o-mini": {
                     name: "GPT-4o-mini",
-                    desc: "鏇村揩鏇寸渷锛岄€傚悎鏃ュ父闂瓟涓庤交閲忓伐浣滄祦",
+                    desc: "更快更省，适合日常问答与轻量工作流",
                 },
                 "gpt-4o": {
                     name: "GPT-4o",
-                    desc: "鏇村潎琛★紝閫傚悎澶嶆潅涓€浜涚殑瀵硅瘽涓庡伐鍏峰崗浣?,
+                    desc: "更均衡，适合复杂一些的对话与工具协作",
                 },
                 "gpt-5.4": {
                     name: "GPT-5.4",
-                    desc: "鏇村己鐨勭患鍚堣兘鍔涳紝閫傚悎楂樿川閲忓洖绛斿拰杈冨鏉傛祦绋?,
+                    desc: "更强的综合能力，适合高质量回答和较复杂流程",
                 },
                 "gpt-5.5": {
                     name: "GPT-5.5",
-                    desc: "鏇村亸楂樻€ц兘鍦烘櫙锛岄€傚悎鏈€閲嶇殑鎺ㄧ悊鍜屾墽琛屼换鍔?,
+                    desc: "更偏高性能场景，适合最重的推理和执行任务",
                 },
             };
-            return map[value] || { name: value, desc: "褰撳墠閫夋嫨鐨勬ā鍨? };
+            return map[value] || { name: value, desc: "当前选择的模型" };
         }
 
         function syncModelPicker() {
@@ -159,24 +159,24 @@
         }
 
         function answerModeLabel(mode) {
-            if (mode === "grounded_summary") return "鍩轰簬璇佹嵁鎬荤粨";
-            if (mode === "tool_agent") return "宸ュ叿鎵ц";
+            if (mode === "grounded_summary") return "基于证据总结";
+            if (mode === "tool_agent") return "工具执行";
             return "-";
         }
 
         function toolLabel(name) {
             const map = {
-                web_search: "鑱旂綉鎼滅储",
-                fetch_webpage: "鎶撳彇缃戦〉",
-                send_email: "鍙戦€侀偖浠?,
+                web_search: "联网搜索",
+                fetch_webpage: "抓取网页",
+                send_email: "发送邮件",
             };
-            return map[name] || name || "宸ュ叿";
+            return map[name] || name || "工具";
         }
 
         function copyText(text, buttonEl) {
             navigator.clipboard.writeText(text).then(() => {
                 const prev = buttonEl.textContent;
-                buttonEl.textContent = "宸插鍒?;
+                buttonEl.textContent = "已复制";
                 setTimeout(() => {
                     buttonEl.textContent = prev;
                 }, 1200);
@@ -198,43 +198,41 @@
 
                 const summary = document.createElement("summary");
                 summary.innerHTML = `
-                    <div class="trace-header">
-                        <div class="trace-header-left">
-                            <span class="trace-tag route-${escapeHtml(planner.route || "unknown")}">${escapeHtml(plannerLabel(planner.route))}</span>
-                        </div>
-                        <span class="trace-header-title">规划决策</span>
+                    <div class="trace-labels">
+                        <span class="trace-tag route-${escapeHtml(planner.route || "unknown")}">${escapeHtml(plannerLabel(planner.route))}</span>
+                        <span>规划决策</span>
                     </div>
                 `;
 
                 const content = document.createElement("div");
                 content.className = "trace-content";
 
-                const actions = planner.post_actions?.length ? planner.post_actions.join(", ") : "鏃?;
+                const actions = planner.post_actions?.length ? planner.post_actions.join(", ") : "无";
                 content.innerHTML = `
                     <div class="kv-grid">
                         <div class="kv">
-                            <strong>璺敱</strong>
+                            <strong>路由</strong>
                             <div>${escapeHtml(plannerLabel(planner.route))}</div>
                         </div>
                         <div class="kv">
-                            <strong>妯″紡</strong>
+                            <strong>模式</strong>
                             <div>${escapeHtml(answerModeLabel(planner.answer_mode))}</div>
                         </div>
                         <div class="kv">
-                            <strong>鏄惁鎶撳彇缃戦〉</strong>
-                            <div>${planner.needs_fetch ? "鏄? : "鍚?}</div>
+                            <strong>是否抓取网页</strong>
+                            <div>${planner.needs_fetch ? "是" : "否"}</div>
                         </div>
                         <div class="kv">
-                            <strong>鍚庣画鍔ㄤ綔</strong>
+                            <strong>后续动作</strong>
                             <div>${escapeHtml(actions)}</div>
                         </div>
                     </div>
                     <div class="kv">
-                        <strong>鍘熷洜</strong>
+                        <strong>原因</strong>
                         <div>${escapeHtml(planner.reason || "-")}</div>
                     </div>
                     <div class="kv">
-                        <strong>鎼滅储璇?/strong>
+                        <strong>搜索词</strong>
                         <pre class="trace-pre">${escapeHtml(planner.search_query || "-")}</pre>
                     </div>
                 `;
@@ -249,11 +247,9 @@
 
                 const summary = document.createElement("summary");
                 summary.innerHTML = `
-                    <div class="trace-header">
-                        <div class="trace-header-left">
-                            <span class="trace-tag trace">${meta.toolTrace.length}</span>
-                        </div>
-                        <span class="trace-header-title">工具轨迹</span>
+                    <div class="trace-labels">
+                        <span class="trace-tag trace">${meta.toolTrace.length}</span>
+                        <span>工具轨迹</span>
                     </div>
                 `;
 
@@ -264,7 +260,7 @@
                     const block = document.createElement("div");
                     block.className = "kv";
                     block.innerHTML = `
-                        <strong>姝ラ ${index + 1} 路 ${escapeHtml(toolLabel(item.tool))}</strong>
+                        <strong>步骤 ${index + 1} · ${escapeHtml(toolLabel(item.tool))}</strong>
                         <pre class="trace-pre">${escapeHtml(item.content || "-")}</pre>
                     `;
                     content.appendChild(block);
@@ -298,7 +294,7 @@ function addMessage(role, content, options = {}) {
             const copyBtn = document.createElement("button");
             copyBtn.className = "copy-btn";
             copyBtn.type = "button";
-            copyBtn.textContent = "澶嶅埗";
+            copyBtn.textContent = "复制";
             copyBtn.addEventListener("click", () => copyText(content, copyBtn));
 
     metaRow.append(timeEl, copyBtn);
@@ -332,7 +328,7 @@ function addMessage(role, content, options = {}) {
             bubble.className = "bubble";
             bubble.innerHTML = `
                 <span class="loading-bubble">
-                    <span>鎬濊€冧腑</span>
+                    <span>思考中</span>
                     <span class="dots">
                         <span class="dot"></span>
                         <span class="dot"></span>
@@ -381,13 +377,13 @@ function addMessage(role, content, options = {}) {
             }
 
             if (userMessage.length > 2000) {
-                setStatus("娑堟伅杩囬暱锛屾渶澶?2000 瀛楃", "error");
+                setStatus("消息过长，最多 2000 字符", "error");
                 return;
             }
 
             isSending = true;
             sendBtnEl.disabled = true;
-            setStatus("姝ｅ湪璇锋眰妯″瀷...");
+            setStatus("正在请求模型...");
 
             promptEl.value = "";
             resizeInput();
@@ -429,17 +425,17 @@ function addMessage(role, content, options = {}) {
                     toolTrace: data.tool_trace || [],
                 };
 
-                addMessage("assistant", data.reply || "鏃犲洖澶?, { meta });
+                addMessage("assistant", data.reply || "无回复", { meta });
 
                 const route = data.planner_decision?.route;
                 const traceCount = data.tool_trace?.length || 0;
-                const statusSuffix = [route ? `璺敱锛?{plannerLabel(route)}` : "", traceCount ? `宸ュ叿锛?{traceCount}` : ""]
+                const statusSuffix = [route ? `路由：${plannerLabel(route)}` : "", traceCount ? `工具：${traceCount}` : ""]
                     .filter(Boolean)
-                    .join(" 路 ");
-                setStatus(statusSuffix ? `鍥炵瓟瀹屾垚 路 ${statusSuffix}` : "鍥炵瓟瀹屾垚");
+                    .join(" · ");
+                setStatus(statusSuffix ? `回答完成 · ${statusSuffix}` : "回答完成");
             } catch (error) {
                 loadingEl.remove();
-                const message = `璇锋眰澶辫触锛?{error.message}`;
+                const message = `请求失败：${error.message}`;
                 addMessage("assistant", message);
                 setStatus(message, "error");
             } finally {
@@ -450,7 +446,7 @@ function addMessage(role, content, options = {}) {
         }
 
         function clearConversation() {
-            if (!window.confirm("纭畾瑕佹竻绌哄綋鍓嶄細璇濆悧锛熻繖浼氬紑濮嬩竴涓柊鐨勪細璇濈嚎绋嬨€?)) {
+            if (!window.confirm("确定要清空当前会话吗？这会开始一个新的会话线程。")) {
                 return;
             }
 
@@ -465,7 +461,7 @@ function addMessage(role, content, options = {}) {
             });
 
             updateEmptyState();
-            setStatus("宸叉竻绌轰細璇濓紝鏂扮殑浼氳瘽绾跨▼宸插氨缁?);
+            setStatus("已清空会话，新的会话线程已就绪");
         }
 
         sendBtnEl.addEventListener("click", sendMessage);
@@ -504,4 +500,3 @@ function addMessage(role, content, options = {}) {
         syncModelPicker();
         resizeInput();
         promptEl.focus();
-

@@ -505,6 +505,7 @@
             list-style: none;
             cursor: pointer;
             display: block;
+            position: relative;
             padding: 12px 14px;
     font-size: 13px;
     font-weight: 700;
@@ -519,31 +520,42 @@
             background: var(--primary-soft);
         }
 
-        .trace-header {
-            position: relative;
-            display: flex;
-            align-items: center;
-            justify-content: flex-start;
-            min-height: 20px;
-            width: 100%;
+        .trace-labels {
+             display: flex;
+             align-items: center;
+             justify-content: flex-start;
+             gap: 8px;
+             min-width: 0;
+             width: 100%;
         }
 
-        .trace-header-left {
-            display: inline-flex;
-            align-items: center;
-            justify-content: flex-start;
-            min-width: 0;
+        .trace-labels > .trace-tag {
+            flex: 0 0 auto;
         }
 
-        .trace-header-title {
+        .trace-labels > span:last-child:not(.trace-tag) {
+            visibility: hidden;
+            width: 0;
+            overflow: hidden;
+            white-space: nowrap;
+        }
+
+        .planner-card summary::after,
+        .tool-trace-card summary::after {
             position: absolute;
             left: 50%;
             top: 50%;
             transform: translate(-50%, -50%);
-            text-align: center;
-            color: var(--text-main);
             pointer-events: none;
-            white-space: nowrap;
+            color: var(--text-main);
+        }
+
+        .planner-card summary::after {
+            content: "规划决策";
+        }
+
+        .tool-trace-card summary::after {
+            content: "工具轨迹";
         }
 
         .trace-tag {
