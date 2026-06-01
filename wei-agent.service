@@ -1,0 +1,16 @@
+[Unit]
+Description=Wei AI Agent
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/wei
+EnvironmentFile=/opt/wei/.env
+ExecStart=/opt/wei/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000 --proxy-headers
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
