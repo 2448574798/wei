@@ -4,6 +4,7 @@
         const sendBtnEl = document.getElementById("sendBtn");
         const clearBtnEl = document.getElementById("clearBtn");
         const themeBtnEl = document.getElementById("themeBtn");
+        const localExecBtnEl = document.getElementById("localExecBtn");
         const modelSelectEl = document.getElementById("modelSelect");
         const modelPickerEl = document.getElementById("modelPicker");
         const modelTriggerEl = document.getElementById("modelTrigger");
@@ -16,11 +17,13 @@
 
         const STORAGE_KEY = "sunwin_messages_v4";
         const MODEL_KEY = "sunwin_model_v4";
+        const LOCAL_EXEC_KEY = "sunwin_local_exec_v1";
         const THEME_KEY = "sunwin_theme_v4";
         const THREAD_KEY = "sunwin_thread_v4";
 
         let chatHistory = [];
         let isSending = false;
+        let localExecutionMode = false;
 
         function setViewportHeight() {
             document.documentElement.style.setProperty("--vh", `${window.innerHeight * 0.01}px`);
@@ -89,6 +92,28 @@
             dot.style.background = type === "error" ? "var(--danger)" : type === "warn" ? "var(--warning)" : "var(--success)";
         }
 
+        function updateLocalExecButton() {
+            localExecBtnEl.classList.toggle("active", localExecutionMode);
+            localExecBtnEl.setAttribute("aria-pressed", String(localExecutionMode));
+            const preferred = modelSelectEl.value === "gpt-5.5" ? "GPT-5.5" : "GPT-5.4";
+            localExecBtnEl.textContent = localExecutionMode ? `本地执行：开 · ${preferred}` : "本地执行：关";
+        }
+
+        function getExecutionModels() {
+            if (!localExecutionMode) {
+                return {
+                    model: modelSelectEl.value,
+                    plannerModel: modelSelectEl.value,
+                };
+            }
+
+            const preferred = modelSelectEl.value === "gpt-5.5" ? "gpt-5.5" : "gpt-5.4";
+            return {
+                model: preferred,
+                plannerModel: preferred,
+            };
+        }
+
         function plannerLabel(route) {
             if (route === "research") return "思考";
             if (route === "agent") return "执行";
@@ -125,6 +150,7 @@
             document.querySelectorAll(".model-option").forEach((button) => {
                 button.classList.toggle("active", button.dataset.value === modelSelectEl.value);
             });
+            updateLocalExecButton();
         }
 
         function closeModelPicker() {
@@ -418,6 +444,7 @@ function addMessage(role, content, options = {}) {
         function persistState() {
             localStorage.setItem(STORAGE_KEY, JSON.stringify(chatHistory));
             localStorage.setItem(MODEL_KEY, modelSelectEl.value);
+            localStorage.setItem(LOCAL_EXEC_KEY, localExecutionMode ? "1" : "0");
         }
 
         function loadState() {
@@ -425,6 +452,8 @@ function addMessage(role, content, options = {}) {
             if (savedModel) {
                 modelSelectEl.value = savedModel;
             }
+
+            localExecutionMode = localStorage.getItem(LOCAL_EXEC_KEY) === "1";
 
             const savedTheme = localStorage.getItem(THEME_KEY);
             if (savedTheme === "dark") {
@@ -440,6 +469,7 @@ function addMessage(role, content, options = {}) {
 
             chatHistory.forEach((item) => addMessage(item.role, item.content, { save: false, time: item.time, meta: item.meta || null }));
             updateEmptyState();
+            updateLocalExecButton();
         }
 
         async function sendMessage() {
@@ -463,10 +493,13 @@ function addMessage(role, content, options = {}) {
             const stopLoadingStages = startLoadingStageRotation(loadingEl);
 
             try {
+                const executionModels = getExecutionModels();
                 const payload = {
-                    model: modelSelectEl.value,
+                    model: executionModels.model,
+                    planner_model: executionModels.plannerModel,
                     messages: [{ role: "user", content: userMessage }],
                     include_tool_trace: true,
+                    local_execution: localExecutionMode,
                 };
 
                 const threadId = getThreadId();
@@ -509,7 +542,11 @@ function addMessage(role, content, options = {}) {
                 addMessage("assistant", data.reply || "无回复", { meta });
 
                 const traceCount = data.tool_trace?.length || 0;
-                const statusSuffix = [route ? `路由：${plannerLabel(route)}` : "", traceCount ? `工具：${traceCount}` : ""]
+                const statusSuffix = [
+                    route ? `路由：${plannerLabel(route)}` : "",
+                    traceCount ? `工具：${traceCount}` : "",
+                    localExecutionMode ? `本地执行模型：${executionModels.model}` : "",
+                ]
                     .filter(Boolean)
                     .join(" · ");
                 setStatus(statusSuffix ? `回答完成 · ${statusSuffix}` : "回答完成");
@@ -547,6 +584,12 @@ function addMessage(role, content, options = {}) {
 
         sendBtnEl.addEventListener("click", sendMessage);
         clearBtnEl.addEventListener("click", clearConversation);
+        localExecBtnEl.addEventListener("click", () => {
+            localExecutionMode = !localExecutionMode;
+            updateLocalExecButton();
+            persistState();
+            setStatus(localExecutionMode ? "本地执行模式已开启，将优先使用 GPT-5.4" : "本地执行模式已关闭");
+        });
 
         promptEl.addEventListener("input", resizeInput);
         promptEl.addEventListener("keydown", (event) => {
@@ -579,5 +622,6 @@ function addMessage(role, content, options = {}) {
         loadState();
         setupModelPicker();
         syncModelPicker();
+        updateLocalExecButton();
         resizeInput();
         promptEl.focus();

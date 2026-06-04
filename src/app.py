@@ -198,6 +198,40 @@ def likely_needs_research(user_text: str) -> bool:
     return is_time_sensitive(user_text) or bool(SEARCH_ACTION_PATTERN.search(user_text))
 
 
+def is_local_execution_intent(user_text: str) -> bool:
+    text = (user_text or "").lower()
+    keywords = [
+        "\u672c\u5730",
+        "\u672c\u673a",
+        "\u7535\u8111",
+        "\u684c\u9762",
+        "\u6253\u5f00",
+        "\u542f\u52a8",
+        "\u8fd0\u884c",
+        "\u6267\u884c\u4ee3\u7801",
+        "\u89e3\u91ca\u5668",
+        "\u6d4f\u89c8\u5668",
+        "\u8bb0\u4e8b\u672c",
+        "\u8ba1\u7b97\u5668",
+        "\u6587\u4ef6",
+        "open local",
+        "on my computer",
+        "on my machine",
+        "local computer",
+        "local machine",
+        "open browser",
+        "open notepad",
+        "open calculator",
+        "run code",
+        "execute code",
+    ]
+    return any(keyword in text for keyword in keywords)
+
+
+def should_prefer_local_execution(user_text: str, config=None) -> bool:
+    return is_local_execution_intent(user_text)
+
+
 def localize_planner_reason(reason: str, route: str, post_actions: list[str] | None = None) -> str:
     text = (reason or "").strip()
     post_actions = post_actions or []
@@ -306,6 +340,7 @@ APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
 APP_PORT = int(os.getenv("APP_PORT", "8000"))
 PLANNER_MODEL = os.getenv("PLANNER_MODEL", "gpt-4o-mini")
 AGENT_MODEL = os.getenv("AGENT_MODEL", "gpt-4o")
+LOCAL_EXECUTION_MODEL = os.getenv("LOCAL_EXECUTION_MODEL", "gpt-5.4")
 ONLINE_RESEARCH_MODEL = os.getenv("ONLINE_RESEARCH_MODEL", "gpt-4o-mini-search-preview")
 ONLINE_RESEARCH_MAX_TOKENS = int(os.getenv("ONLINE_RESEARCH_MAX_TOKENS", "420"))
 SYSTEM_PROMPT_TEXT = load_system_prompt()
@@ -565,6 +600,148 @@ async def agent_node(state: AgentState, config=None):
     return {"messages": [response]}
 
 
+def build_planner_prompt(user_text: str, today: str, local_execution: bool = False) -> list:
+    return [
+        SystemMessage(
+            content=(
+                "你是工作流规划节点，只返回结构化决策。\n"
+                "如果请求依赖当前、最新、会变化的信息，选择 route='research'。\n"
+                "如果是稳定知识、普通写作，或可以直接进入工具执行，选择 route='agent'。\n"
+                "如果请求涉及本地电脑、本地程序、本地文件、浏览器、桌面操作或运行代码，优先选择 route='agent'。\n"
+                "只有在用户明确要求发送邮件，且消息里已经出现收件邮箱时，post_actions 才能包含 send_email；否则必须返回空数组。\n"
+                "如果选择 research，请给出简洁可用的 search_query。\n"
+                "reason 用中文，保持简短。"
+            )
+        ),
+        HumanMessage(
+            content=(
+                f"今天日期：{today}\n"
+                f"用户请求：{user_text}\n"
+                f"提示：{'这是明显的时效性问题' if is_time_sensitive(user_text) else '这不是明显的时效性问题'}\n"
+                f"本地执行模式：{'开启' if local_execution else '关闭'}\n"
+                f"本地执行意图：{'是' if is_local_execution_intent(user_text) else '否'}"
+            )
+        ),
+    ]
+
+
+async def planner_node(state: AgentState, config=None):
+    model_name = PLANNER_MODEL
+    local_execution = False
+    if config and "configurable" in config:
+        model_name = config["configurable"].get("planner_model", model_name)
+        local_execution = bool(config["configurable"].get("local_execution"))
+
+    user_text = get_latest_user_text(state["messages"])
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    if not user_text:
+        return {
+            "planner_decision": normalize_planner_decision(PlannerDecision(), user_text),
+            "tool_trace": [],
+            "research_result": "",
+        }
+
+    if should_prefer_local_execution(user_text, config):
+        decision = normalize_planner_decision(
+            {
+                "route": "agent",
+                "reason": "请求涉及本地执行或电脑操作，优先进入执行流程。",
+                "search_query": "",
+                "answer_mode": "tool_agent",
+                "post_actions": infer_post_actions(user_text),
+            },
+            user_text,
+        )
+        return {
+            "planner_decision": decision,
+            "tool_trace": [],
+            "research_result": "",
+        }
+
+    planner_prompt = build_planner_prompt(user_text, today, local_execution=local_execution)
+    try:
+        llm = get_llm(model_name).with_structured_output(PlannerDecision)
+        raw_decision = await llm.ainvoke(planner_prompt)
+    except Exception as exc:
+        logger.warning("Planner model %s failed, using heuristic fallback: %s", model_name, exc)
+        raw_decision = build_heuristic_planner_decision(user_text)
+
+    decision = normalize_planner_decision(raw_decision, user_text)
+    logger.info(
+        "Planner route=%s reason=%s query=%s post_actions=%s local_execution=%s",
+        decision["route"],
+        decision["reason"],
+        decision["search_query"],
+        decision["post_actions"],
+        local_execution,
+    )
+    return {
+        "planner_decision": decision,
+        "tool_trace": [],
+        "research_result": "",
+    }
+
+
+def route_after_planner(state: AgentState):
+    decision = state.get("planner_decision") or {}
+    user_text = get_latest_user_text(state["messages"])
+    if should_prefer_local_execution(user_text):
+        return "agent"
+    if decision.get("route") != "research" and is_time_sensitive(user_text):
+        return "research"
+    return decision.get("route", "agent")
+
+
+async def agent_node(state: AgentState, config=None):
+    model_name = AGENT_MODEL
+    local_execution = False
+    if config and "configurable" in config:
+        local_execution = bool(config["configurable"].get("local_execution"))
+        model_name = config["configurable"].get("model", model_name)
+
+    user_text = get_latest_user_text(state["messages"])
+    if local_execution and model_name != "gpt-5.5":
+        model_name = LOCAL_EXECUTION_MODEL
+
+    llm = get_llm(model_name)
+    llm_with_tools = llm.bind_tools([send_email, ask_open_interpreter])
+    system_prompt = build_runtime_system_prompt()
+    system_prompt += (
+        "\n\nTool policy:\n"
+        "- Use ask_open_interpreter only when code execution or local computer actions are actually needed.\n"
+        "- Pass runnable code directly to ask_open_interpreter, not natural-language instructions.\n"
+        "- For side-effect actions such as opening apps, opening a browser, writing files, or launching programs, "
+        "make the code print a short Chinese success message after the action completes.\n"
+        "- Do not return raw booleans like True or False when a clearer execution message can be printed.\n"
+        "- Use send_email only when the user explicitly asks to send an email and a recipient is available.\n"
+    )
+    if local_execution or is_local_execution_intent(user_text):
+        system_prompt += (
+            "\n\nLocal execution policy:\n"
+            "- The user is asking to operate their local computer or run local code.\n"
+            "- Strongly prefer ask_open_interpreter for these tasks instead of answering abstractly.\n"
+            "- If you call ask_open_interpreter, provide complete runnable code.\n"
+            "- When opening local apps, browsers, files, or performing side effects, include a final print statement in Chinese describing what succeeded.\n"
+            "- Prefer concise, reliable code over fancy code."
+        )
+    if state.get("research_result"):
+        system_prompt += (
+            "\n\nA grounded research answer already exists in the conversation. "
+            "Use that answer as the source of truth for any follow-up actions."
+        )
+
+    messages = state["messages"]
+    system_msg = SystemMessage(content=system_prompt)
+    if not messages or not isinstance(messages[0], SystemMessage):
+        messages = [system_msg] + messages
+    else:
+        messages = [system_msg] + messages[1:]
+
+    response = await llm_with_tools.ainvoke(messages)
+    return {"messages": [response]}
+
+
 def should_continue_agent(state: AgentState):
     last_message = state["messages"][-1]
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
@@ -736,6 +913,7 @@ async def health():
         "one_api_token_configured": bool(ONE_API_TOKEN),
         "planner_model": PLANNER_MODEL,
         "agent_model": AGENT_MODEL,
+        "local_execution_model": LOCAL_EXECUTION_MODEL,
         "online_research_model": ONLINE_RESEARCH_MODEL,
         "smtp_configured": smtp_is_configured(),
         "open_interpreter_configured": open_interpreter_is_configured(),
@@ -772,6 +950,10 @@ async def chat(request: Request):
     model = data.get("model", AGENT_MODEL)
     planner_model = data.get("planner_model", PLANNER_MODEL)
     online_research_model = data.get("online_research_model", ONLINE_RESEARCH_MODEL)
+    local_execution = bool(data.get("local_execution"))
+    if local_execution:
+        planner_model = data.get("planner_model", LOCAL_EXECUTION_MODEL)
+        model = data.get("model", LOCAL_EXECUTION_MODEL)
     include_tool_trace = bool(data.get("include_tool_trace"))
     config = {
         "configurable": {
@@ -779,6 +961,7 @@ async def chat(request: Request):
             "model": model,
             "planner_model": planner_model,
             "online_research_model": online_research_model,
+            "local_execution": local_execution,
         }
     }
 
