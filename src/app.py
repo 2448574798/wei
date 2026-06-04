@@ -22,7 +22,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from src.tools import send_email, smtp_is_configured
+from src.tools import ask_open_interpreter, open_interpreter_is_configured, send_email, smtp_is_configured
 
 
 SRC_DIR = Path(__file__).resolve().parent
@@ -553,7 +553,7 @@ async def agent_node(state: AgentState, config=None):
         model_name = config["configurable"].get("model", model_name)
 
     llm = get_llm(model_name)
-    llm_with_tools = llm.bind_tools([send_email])
+    llm_with_tools = llm.bind_tools([send_email, ask_open_interpreter])
     system_prompt = build_runtime_system_prompt()
     if state.get("research_result"):
         system_prompt += (
@@ -586,7 +586,7 @@ async def lifespan(app: FastAPI):
         workflow.add_node("planner", planner_node)
         workflow.add_node("online_research", online_research_node)
         workflow.add_node("agent", agent_node)
-        workflow.add_node("tools", ToolNode([send_email]))
+        workflow.add_node("tools", ToolNode([send_email, ask_open_interpreter]))
 
         workflow.set_entry_point("planner")
         workflow.add_conditional_edges(
@@ -631,6 +631,7 @@ async def health():
         "agent_model": AGENT_MODEL,
         "online_research_model": ONLINE_RESEARCH_MODEL,
         "smtp_configured": smtp_is_configured(),
+        "open_interpreter_configured": open_interpreter_is_configured(),
     }
 
 

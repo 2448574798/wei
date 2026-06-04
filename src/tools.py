@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
+from websockets.sync.client import connect
 
 
 logger = logging.getLogger("wei_agent")
@@ -36,6 +37,26 @@ REQUEST_HEADERS = {
     "Upgrade-Insecure-Requests": "1",
 }
 FETCH_BLOCKED_STATUS_CODES = {403, 429}
+
+
+def get_open_interpreter_url() -> str:
+    return os.getenv("OPEN_INTERPRETER_URL", "").strip().rstrip("/")
+
+
+def get_open_interpreter_model() -> str:
+    return os.getenv("OPEN_INTERPRETER_MODEL", "open-interpreter").strip() or "open-interpreter"
+
+
+def get_open_interpreter_timeout() -> int:
+    return int(os.getenv("OPEN_INTERPRETER_TIMEOUT", "90"))
+
+
+def get_open_interpreter_auth_key() -> str:
+    return os.getenv("OPEN_INTERPRETER_AUTH_KEY", "dummy-api-key").strip() or "dummy-api-key"
+
+
+def open_interpreter_is_configured() -> bool:
+    return bool(get_open_interpreter_url())
 
 
 def smtp_is_configured() -> bool:
@@ -107,6 +128,102 @@ def fetch_webpage(url: str) -> str:
     except Exception as exc:
         logger.warning("Fetch failed for %s: %s", get_domain(url), exc)
         return f"Fetch failed: {exc}"
+
+
+def _to_open_interpreter_ws_url(base_url: str) -> str:
+    if base_url.startswith("https://"):
+        return "wss://" + base_url[len("https://") :].rstrip("/") + "/"
+    if base_url.startswith("http://"):
+        return "ws://" + base_url[len("http://") :].rstrip("/") + "/"
+    if base_url.startswith("wss://") or base_url.startswith("ws://"):
+        return base_url.rstrip("/") + "/"
+    return "ws://" + base_url.rstrip("/") + "/"
+
+
+def _send_open_interpreter_payload(ws, payload: dict) -> None:
+    import json
+
+    ws.send(json.dumps(payload))
+
+
+def ask_open_interpreter(code: str, language: str = "python") -> str:
+    """Execute already-prepared code with Open Interpreter. The caller must decide the code; this tool only runs it."""
+    base_url = get_open_interpreter_url()
+    if not base_url:
+        return "Open Interpreter is not configured. Set OPEN_INTERPRETER_URL."
+
+    code = (code or "").strip()
+    if not code:
+        return "Open Interpreter code cannot be empty."
+
+    timeout = get_open_interpreter_timeout()
+    ws_url = _to_open_interpreter_ws_url(base_url)
+    auth_key = get_open_interpreter_auth_key()
+    console_chunks: list[str] = []
+    server_errors: list[str] = []
+
+    try:
+        with connect(ws_url, open_timeout=min(timeout, 15), close_timeout=5) as ws:
+            _send_open_interpreter_payload(ws, {"auth": auth_key})
+
+            authenticated = False
+            # Allow a few frames for auth / stale status frames.
+            for _ in range(5):
+                raw = ws.recv(timeout=3)
+                import json
+
+                data = json.loads(raw)
+                if data.get("auth") is True:
+                    authenticated = True
+                    break
+                if data.get("type") == "error":
+                    server_errors.append(str(data.get("content", "")).strip())
+            if not authenticated:
+                return "Open Interpreter authentication failed."
+
+            _send_open_interpreter_payload(ws, {"role": "assistant", "start": True})
+            _send_open_interpreter_payload(
+                ws,
+                {
+                    "role": "assistant",
+                    "type": "code",
+                    "format": language,
+                    "content": code,
+                },
+            )
+            _send_open_interpreter_payload(ws, {"role": "user", "type": "command", "start": True})
+            _send_open_interpreter_payload(ws, {"role": "user", "type": "command", "content": "go"})
+            _send_open_interpreter_payload(ws, {"role": "user", "type": "command", "end": True})
+
+            for _ in range(80):
+                raw = ws.recv(timeout=8)
+                import json
+
+                data = json.loads(raw)
+                msg_type = data.get("type")
+                msg_format = data.get("format")
+
+                if msg_type == "console" and msg_format == "output":
+                    text = str(data.get("content", ""))
+                    if text:
+                        console_chunks.append(text)
+                elif msg_type == "error":
+                    server_errors.append(str(data.get("content", "")).strip())
+                elif msg_type == "console" and msg_format == "active_line" and data.get("content") is None:
+                    break
+                elif msg_type == "status" and data.get("content") == "complete":
+                    break
+
+    except Exception as exc:
+        logger.warning("Open Interpreter websocket request failed: %s", exc)
+        return f"Open Interpreter request failed: {exc}"
+
+    output = "".join(console_chunks).strip()
+    if output:
+        return output
+    if server_errors:
+        return f"Open Interpreter execution failed: {server_errors[-1][:1200]}"
+    return "Open Interpreter returned no output."
 
 
 def send_email(to: str, subject: str, body: str) -> str:

@@ -25,6 +25,7 @@
 - `planner`：判断是直接执行，还是先联网思考
 - `online_research`：调用支持联网的模型获取最新信息
 - `agent`：负责常规回答，以及调用如 `send_email` 这类工具
+- 如已配置 `OPEN_INTERPRETER_URL`，`agent` 还可以调用本地 Open Interpreter 服务执行代码
 
 ## 项目结构
 
@@ -65,6 +66,7 @@ cp .env.example .env
 - `PLANNER_MODEL`
 - `AGENT_MODEL`
 - `ONLINE_RESEARCH_MODEL`
+- `OPEN_INTERPRETER_URL`
 
 如果需要发送邮件，还需要配置：
 
@@ -73,6 +75,11 @@ cp .env.example .env
 - `SMTP_USER`
 - `SMTP_PASSWORD`
 - `SMTP_FROM`
+
+可选的 Open Interpreter 相关配置：
+
+- `OPEN_INTERPRETER_AUTH_KEY`
+- `OPEN_INTERPRETER_TIMEOUT`
 
 ## 本地启动
 

@@ -170,6 +170,7 @@
                 fetch_webpage: "抓取网页",
                 send_email: "发送邮件",
                 online_research: "联网思考",
+                ask_open_interpreter: "本地解释器",
             };
             return map[name] || name || "工具";
         }

@@ -9,3 +9,4 @@ redis==7.4.0
 requests==2.34.2
 slowapi==0.1.9
 uvicorn==0.48.0
+websockets==16.0
