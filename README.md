@@ -146,3 +146,33 @@ sudo systemctl status wei-agent
 - 回复内容
 
 其中用户可见文案已统一使用“思考”表达，不直接暴露内部 `research` 路由名。
+
+## 登录与会话
+
+当前版本已增加基础登录能力：
+
+- 访问 `/login.html` 可以进入登录页
+- 登录成功后会写入站点会话 cookie
+- 未登录访问主页面时，会自动跳转到登录页
+- `/api/chat` 现在要求先登录
+
+默认通过环境变量种子初始化第一个管理员账号：
+
+- `AUTH_ADMIN_USERNAME`
+- `AUTH_ADMIN_PASSWORD`
+- `AUTH_ADMIN_DISPLAY_NAME`
+
+认证与数据相关配置：
+
+- `AUTH_DB_PATH`：本地 SQLite 用户与会话库路径
+- `AUTH_COOKIE_NAME`：登录 cookie 名称
+- `AUTH_COOKIE_SECURE`：在 HTTPS 环境建议设为 `true`
+- `AUTH_SESSION_TTL_DAYS`：登录会话有效天数
+
+后续如果要扩展注册能力，可以直接在现有用户表基础上增加：
+
+- 用户自定义密码注册
+- 每个用户独立的 `frp_client_name`
+- 每个用户独立的 `frp_remote_port`
+- 每个用户独立的 `open_interpreter_url`
+- 对接 `frps API` 后按登录用户解析其本地入口

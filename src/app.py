@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 import requests
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -22,6 +22,15 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from src.auth_store import (
+    create_session,
+    delete_session,
+    ensure_seed_admin,
+    get_session_user,
+    get_user_by_username,
+    init_auth_db,
+    verify_password,
+)
 from src.tools import ask_open_interpreter, open_interpreter_is_configured, send_email, smtp_is_configured
 
 
@@ -343,6 +352,8 @@ AGENT_MODEL = os.getenv("AGENT_MODEL", "gpt-4o")
 LOCAL_EXECUTION_MODEL = os.getenv("LOCAL_EXECUTION_MODEL", "gpt-5.4")
 ONLINE_RESEARCH_MODEL = os.getenv("ONLINE_RESEARCH_MODEL", "gpt-4o-mini-search-preview")
 ONLINE_RESEARCH_MAX_TOKENS = int(os.getenv("ONLINE_RESEARCH_MAX_TOKENS", "420"))
+AUTH_COOKIE_NAME = os.getenv("AUTH_COOKIE_NAME", "wei_session")
+AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "false").strip().lower() == "true"
 SYSTEM_PROMPT_TEXT = load_system_prompt()
 
 if not ONE_API_TOKEN:
@@ -406,6 +417,20 @@ def public_planner_decision(decision: dict | None) -> dict:
     data = dict(decision or {})
     data.pop("search_query", None)
     return data
+
+
+def get_current_user(request: Request) -> dict | None:
+    session_id = request.cookies.get(AUTH_COOKIE_NAME, "").strip()
+    if not session_id:
+        return None
+    return get_session_user(session_id)
+
+
+def require_authenticated_user(request: Request) -> dict:
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    return user
 
 
 def call_online_research_model(user_text: str, search_query: str, model_name: str) -> str:
@@ -865,6 +890,8 @@ async def agent_node(state: AgentState, config=None):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    init_auth_db()
+    ensure_seed_admin()
     async with AsyncRedisSaver.from_conn_string(REDIS_URL) as checkpointer:
         workflow = StateGraph(AgentState)
         workflow.add_node("planner", planner_node)
@@ -920,9 +947,79 @@ async def health():
     }
 
 
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not logged in.")
+    return {
+        "authenticated": True,
+        "user": {
+            "id": user["id"],
+            "username": user["username"],
+            "display_name": user["display_name"],
+            "role": user["role"],
+            "frp_client_name": user.get("frp_client_name", ""),
+            "frp_remote_port": user.get("frp_remote_port"),
+            "open_interpreter_url": user.get("open_interpreter_url", ""),
+        },
+    }
+
+
+@app.post("/api/auth/login")
+async def auth_login(request: Request):
+    try:
+        data = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON request body.") from exc
+
+    username = str(data.get("username", "")).strip()
+    password = str(data.get("password", "")).strip()
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Username and password are required.")
+
+    user = get_user_by_username(username)
+    if not user or not verify_password(password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+
+    session_id, expires_at = create_session(int(user["id"]))
+    response = JSONResponse(
+        content={
+            "authenticated": True,
+            "user": {
+                "id": user["id"],
+                "username": user["username"],
+                "display_name": user["display_name"],
+                "role": user["role"],
+            },
+        }
+    )
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=session_id,
+        httponly=True,
+        samesite="lax",
+        secure=AUTH_COOKIE_SECURE,
+        expires=expires_at.strftime("%a, %d %b %Y %H:%M:%S GMT"),
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request):
+    session_id = request.cookies.get(AUTH_COOKIE_NAME, "").strip()
+    if session_id:
+        delete_session(session_id)
+    response = JSONResponse(content={"ok": True})
+    response.delete_cookie(AUTH_COOKIE_NAME, path="/")
+    return response
+
+
 @app.post("/api/chat")
 @limiter.limit("10 per minute")
 async def chat(request: Request):
+    current_user = require_authenticated_user(request)
     try:
         data = await request.json()
     except Exception as exc:
@@ -962,6 +1059,8 @@ async def chat(request: Request):
             "planner_model": planner_model,
             "online_research_model": online_research_model,
             "local_execution": local_execution,
+            "user_id": current_user["id"],
+            "username": current_user["username"],
         }
     }
 

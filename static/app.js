@@ -5,6 +5,7 @@
         const clearBtnEl = document.getElementById("clearBtn");
         const themeBtnEl = document.getElementById("themeBtn");
         const localExecBtnEl = document.getElementById("localExecBtn");
+        const logoutBtnEl = document.getElementById("logoutBtn");
         const modelSelectEl = document.getElementById("modelSelect");
         const modelPickerEl = document.getElementById("modelPicker");
         const modelTriggerEl = document.getElementById("modelTrigger");
@@ -24,6 +25,7 @@
         let chatHistory = [];
         let isSending = false;
         let localExecutionMode = false;
+        let currentUser = null;
 
         function setViewportHeight() {
             document.documentElement.style.setProperty("--vh", `${window.innerHeight * 0.01}px`);
@@ -90,6 +92,20 @@
             statusTextEl.textContent = text;
             const dot = statusLineEl.querySelector(".status-dot");
             dot.style.background = type === "error" ? "var(--danger)" : type === "warn" ? "var(--warning)" : "var(--success)";
+        }
+
+        async function ensureAuthenticated() {
+            const response = await fetch("/api/auth/me", { credentials: "same-origin" });
+            if (!response.ok) {
+                const next = encodeURIComponent(window.location.pathname + window.location.search);
+                window.location.replace(`/login.html?next=${next}`);
+                throw new Error("Not authenticated");
+            }
+            const data = await response.json();
+            currentUser = data.user || null;
+            if (currentUser?.display_name) {
+                setStatus(`已登录：${currentUser.display_name}`);
+            }
         }
 
         function updateLocalExecButton() {
@@ -508,6 +524,7 @@ function addMessage(role, content, options = {}) {
 
                 const response = await fetch("/api/chat", {
                     method: "POST",
+                    credentials: "same-origin",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(payload),
                 });
@@ -589,6 +606,16 @@ function addMessage(role, content, options = {}) {
             persistState();
             setStatus(localExecutionMode ? "本地执行模式已开启，将优先使用 GPT-5.4" : "本地执行模式已关闭");
         });
+        logoutBtnEl.addEventListener("click", async () => {
+            try {
+                await fetch("/api/auth/logout", {
+                    method: "POST",
+                    credentials: "same-origin",
+                });
+            } finally {
+                window.location.replace("/login.html");
+            }
+        });
 
         promptEl.addEventListener("input", resizeInput);
         promptEl.addEventListener("keydown", (event) => {
@@ -618,9 +645,16 @@ function addMessage(role, content, options = {}) {
         window.addEventListener("resize", setViewportHeight);
         window.addEventListener("orientationchange", setViewportHeight);
 
-        loadState();
-        setupModelPicker();
-        syncModelPicker();
-        updateLocalExecButton();
-        resizeInput();
-        promptEl.focus();
+        (async () => {
+            try {
+                await ensureAuthenticated();
+                loadState();
+                setupModelPicker();
+                syncModelPicker();
+                updateLocalExecButton();
+                resizeInput();
+                promptEl.focus();
+            } catch (error) {
+                console.error(error);
+            }
+        })();
