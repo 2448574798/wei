@@ -70,7 +70,12 @@
                             </button>
                         </div>
                     </div>
-                    <button id="localExecBtn" class="toolbar-btn subtle" type="button" aria-pressed="false">本地执行：关</button>
+                    <button id="localExecBtn" class="mode-switch" type="button" aria-pressed="false" aria-label="本地执行模式">
+                        <span class="mode-switch-label">本地执行</span>
+                        <span class="mode-switch-track" aria-hidden="true">
+                            <span class="mode-switch-thumb"></span>
+                        </span>
+                    </button>
                     <button id="themeBtn" class="toolbar-btn subtle" type="button">主题</button>
                     <button id="clearBtn" class="toolbar-btn subtle" type="button">新会话</button>
                 </div>

@@ -95,8 +95,7 @@
         function updateLocalExecButton() {
             localExecBtnEl.classList.toggle("active", localExecutionMode);
             localExecBtnEl.setAttribute("aria-pressed", String(localExecutionMode));
-            const preferred = modelSelectEl.value === "gpt-5.5" ? "GPT-5.5" : "GPT-5.4";
-            localExecBtnEl.textContent = localExecutionMode ? `本地执行：开 · ${preferred}` : "本地执行：关";
+            localExecBtnEl.title = localExecutionMode ? "本地执行模式已开启" : "本地执行模式已关闭";
         }
 
         function getExecutionModels() {
