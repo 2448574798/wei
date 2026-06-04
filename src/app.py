@@ -190,13 +190,6 @@ def extract_email_targets(user_text: str) -> list[str]:
     return EMAIL_PATTERN.findall(user_text)
 
 
-def infer_post_actions(user_text: str) -> list[str]:
-    emails = extract_email_targets(user_text)
-    if emails and EMAIL_ACTION_PATTERN.search(user_text):
-        return ["send_email"]
-    return []
-
-
 def is_time_sensitive(user_text: str) -> bool:
     return bool(TIME_SENSITIVE_PATTERN.search(user_text))
 
@@ -242,7 +235,7 @@ def normalize_planner_decision(decision: PlannerDecision | dict, user_text: str)
     if data.get("route") == "research":
         data["search_query"] = normalize_search_query(data.get("search_query", ""), user_text)
 
-    post_actions = list(dict.fromkeys(data.get("post_actions") or infer_post_actions(user_text)))
+    post_actions = infer_post_actions(user_text)
     data["post_actions"] = post_actions
     if post_actions and data.get("route") != "research" and likely_needs_research(user_text):
         data["route"] = "research"
@@ -577,6 +570,120 @@ def should_continue_agent(state: AgentState):
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
         return "tools"
     return "__end__"
+
+
+def infer_post_actions(user_text: str) -> list[str]:
+    emails = extract_email_targets(user_text)
+    lowered = (user_text or "").lower()
+    email_action_terms = [
+        "\u53d1\u9001\u5230",
+        "\u53d1\u9001\u7ed9",
+        "\u53d1\u5230",
+        "\u53d1\u7ed9",
+        "\u53d1\u90ae\u4ef6",
+        "\u53d1\u90ae\u7bb1",
+        "\u90ae\u4ef6",
+        "\u90ae\u7bb1",
+        "email",
+        "mail",
+    ]
+    if emails and any(term in user_text or term in lowered for term in email_action_terms):
+        return ["send_email"]
+    return []
+
+
+def build_planner_prompt(user_text: str, today: str) -> list:
+    return [
+        SystemMessage(
+            content=(
+                "你是工作流规划节点，只返回结构化决策。\n"
+                "如果请求依赖当前、最新、会变化的信息，选择 route='research'。\n"
+                "如果是稳定知识、普通写作，或可以直接进入工具执行，选择 route='agent'。\n"
+                "只有在用户明确要求发送邮件，且消息里已经出现收件邮箱时，post_actions 才能包含 send_email；否则必须返回空数组。\n"
+                "如果选择 research，请给出简洁可用的 search_query。\n"
+                "reason 用中文，保持简短。"
+            )
+        ),
+        HumanMessage(
+            content=(
+                f"今天日期：{today}\n"
+                f"用户请求：{user_text}\n"
+                f"提示：{'这是明显的时效性问题' if is_time_sensitive(user_text) else '这不是明显的时效性问题'}"
+            )
+        ),
+    ]
+
+
+async def planner_node(state: AgentState, config=None):
+    model_name = PLANNER_MODEL
+    if config and "configurable" in config and config["configurable"].get("planner_model"):
+        model_name = config["configurable"]["planner_model"]
+
+    user_text = get_latest_user_text(state["messages"])
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    if not user_text:
+        return {
+            "planner_decision": normalize_planner_decision(PlannerDecision(), user_text),
+            "tool_trace": [],
+            "research_result": "",
+        }
+
+    planner_prompt = build_planner_prompt(user_text, today)
+    try:
+        llm = get_llm(model_name).with_structured_output(PlannerDecision)
+        raw_decision = await llm.ainvoke(planner_prompt)
+    except Exception as exc:
+        logger.warning("Planner model %s failed, using heuristic fallback: %s", model_name, exc)
+        raw_decision = build_heuristic_planner_decision(user_text)
+
+    decision = normalize_planner_decision(raw_decision, user_text)
+    logger.info(
+        "Planner route=%s reason=%s query=%s post_actions=%s",
+        decision["route"],
+        decision["reason"],
+        decision["search_query"],
+        decision["post_actions"],
+    )
+    return {
+        "planner_decision": decision,
+        "tool_trace": [],
+        "research_result": "",
+    }
+
+
+async def agent_node(state: AgentState, config=None):
+    model_name = AGENT_MODEL
+    if config and "configurable" in config:
+        model_name = config["configurable"].get("model", model_name)
+
+    llm = get_llm(model_name)
+    llm_with_tools = llm.bind_tools([send_email, ask_open_interpreter])
+    system_prompt = build_runtime_system_prompt()
+    system_prompt += (
+        "\n\nTool policy:\n"
+        "- Use ask_open_interpreter only when code execution or local computer actions are actually needed.\n"
+        "- Pass runnable code directly to ask_open_interpreter, not natural-language instructions.\n"
+        "- For side-effect actions such as opening apps, opening a browser, writing files, or launching programs, "
+        "make the code print a short Chinese success message after the action completes.\n"
+        "- Do not return raw booleans like True or False when a clearer execution message can be printed.\n"
+        "- Use send_email only when the user explicitly asks to send an email and a recipient is available.\n"
+    )
+    if state.get("research_result"):
+        system_prompt += (
+            "\n\nA grounded research answer already exists in the conversation. "
+            "Use that answer as the source of truth for any follow-up actions."
+        )
+
+    messages = state["messages"]
+    system_msg = SystemMessage(content=system_prompt)
+    if not messages or not isinstance(messages[0], SystemMessage):
+        messages = [system_msg] + messages
+    else:
+        messages = [system_msg] + messages[1:]
+
+    response = await llm_with_tools.ainvoke(messages)
+    return {"messages": [response]}
 
 
 @asynccontextmanager

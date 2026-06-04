@@ -146,8 +146,36 @@ def _send_open_interpreter_payload(ws, payload: dict) -> None:
     ws.send(json.dumps(payload))
 
 
+def _format_open_interpreter_result(code: str, output: str) -> str:
+    cleaned = (output or "").strip()
+    if not cleaned:
+        return "执行完成，但没有产生控制台输出。"
+
+    normalized = cleaned.replace("\r\n", "\n").strip()
+    side_effect_code = any(
+        keyword in code
+        for keyword in [
+            "webbrowser.open",
+            "os.startfile",
+            "subprocess.Popen",
+            "subprocess.run",
+            "subprocess.call",
+            "start ",
+        ]
+    )
+    if normalized in {"True", "False"} and side_effect_code:
+        return f"执行完成，动作已触发。原始返回值：{normalized}"
+    return normalized
+
+
 def ask_open_interpreter(code: str, language: str = "python") -> str:
-    """Execute already-prepared code with Open Interpreter. The caller must decide the code; this tool only runs it."""
+    """Execute already-prepared code with Open Interpreter.
+
+    Pass runnable code directly, not natural-language instructions.
+    For side-effect tasks such as opening apps, launching a browser, or writing files,
+    prefer code that prints a short Chinese success message after execution.
+    Avoid returning raw booleans like True or False when a clearer status message can be printed.
+    """
     base_url = get_open_interpreter_url()
     if not base_url:
         return "Open Interpreter is not configured. Set OPEN_INTERPRETER_URL."
@@ -220,7 +248,7 @@ def ask_open_interpreter(code: str, language: str = "python") -> str:
 
     output = "".join(console_chunks).strip()
     if output:
-        return output
+        return _format_open_interpreter_result(code, output)
     if server_errors:
         return f"Open Interpreter execution failed: {server_errors[-1][:1200]}"
     return "Open Interpreter returned no output."
