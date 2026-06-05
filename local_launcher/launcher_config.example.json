@@ -1,0 +1,31 @@
+{
+  "processes": [
+    {
+      "name": "frpc",
+      "enabled": true,
+      "command": [
+        "{APP_DIR}\\bin\\frpc.exe",
+        "-c",
+        "{APP_DIR}\\bin\\frpc.toml"
+      ],
+      "cwd": "{APP_DIR}",
+      "env": {},
+      "ready_url": "",
+      "ready_timeout_sec": 0
+    },
+    {
+      "name": "open_interpreter",
+      "enabled": true,
+      "command": [
+        "{APP_DIR}\\bin\\open-interpreter-server.exe"
+      ],
+      "cwd": "{APP_DIR}",
+      "env": {
+        "OPEN_INTERPRETER_PORT": "18000",
+        "OPEN_INTERPRETER_HOST": "127.0.0.1"
+      },
+      "ready_url": "http://127.0.0.1:18000",
+      "ready_timeout_sec": 30
+    }
+  ]
+}

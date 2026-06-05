@@ -1,0 +1,33 @@
+{
+  "processes": [
+    {
+      "name": "frpc",
+      "enabled": true,
+      "command": [
+        "D:\\Download\\frp_0.68.1_windows_amd64\\frp_0.68.1_windows_amd64\\frpc.exe",
+        "-c",
+        "D:\\Download\\frp_0.68.1_windows_amd64\\frp_0.68.1_windows_amd64\\frpc.toml"
+      ],
+      "cwd": "D:\\Download\\frp_0.68.1_windows_amd64\\frp_0.68.1_windows_amd64",
+      "env": {},
+      "ready_url": "",
+      "ready_timeout_sec": 0
+    },
+    {
+      "name": "open_interpreter",
+      "enabled": true,
+      "command": [
+        "D:\\Download\\oi-env-310\\Scripts\\interpreter.exe",
+        "--server"
+      ],
+      "cwd": "D:\\Download\\oi-env-310",
+      "env": {
+        "INTERPRETER_PORT": "18000",
+        "INTERPRETER_HOST": "127.0.0.1",
+        "INTERPRETER_API_KEY": "dummy-api-key"
+      },
+      "ready_url": "http://127.0.0.1:18000/heartbeat",
+      "ready_timeout_sec": 30
+    }
+  ]
+}

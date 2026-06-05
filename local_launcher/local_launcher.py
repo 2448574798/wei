@@ -1,0 +1,204 @@
+from __future__ import annotations
+
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+def is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def app_dir() -> Path:
+    if is_frozen():
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def load_config(config_path: Path) -> dict:
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Missing config file: {config_path}\n"
+            "Copy launcher_config.example.json to launcher_config.json and edit it first."
+        )
+    return json.loads(config_path.read_text(encoding="utf-8-sig"))
+
+
+def ensure_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def now_text() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def write_log(log_path: Path, message: str) -> None:
+    line = f"[{now_text()}] {message}\n"
+    print(message)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+
+
+def wait_for_url(url: str, timeout_sec: int, log_path: Path, name: str) -> bool:
+    if not url:
+        return True
+    deadline = time.time() + max(timeout_sec, 1)
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=3) as response:
+                if 200 <= response.status < 500:
+                    write_log(log_path, f"{name} ready: {url}")
+                    return True
+        except urllib.error.URLError:
+            pass
+        except Exception:
+            pass
+        time.sleep(1)
+    write_log(log_path, f"{name} not ready before timeout: {url}")
+    return False
+
+
+def expand_value(value: str, base_dir: Path) -> str:
+    text = os.path.expandvars(str(value))
+    text = text.replace("{APP_DIR}", str(base_dir))
+    return text
+
+
+def build_env(extra_env: dict[str, str], base_dir: Path) -> dict[str, str]:
+    env = dict(os.environ)
+    for key, value in extra_env.items():
+        env[str(key)] = expand_value(str(value), base_dir)
+    return env
+
+
+def spawn_process(entry: dict, base_dir: Path, logs_dir: Path, log_path: Path) -> subprocess.Popen:
+    name = entry["name"]
+    command = [expand_value(part, base_dir) for part in entry["command"]]
+    cwd = Path(expand_value(entry.get("cwd", str(base_dir)), base_dir))
+    env = build_env(entry.get("env", {}), base_dir)
+    stdout_path = logs_dir / f"{name}.out.log"
+    stderr_path = logs_dir / f"{name}.err.log"
+
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+
+    stdout_handle = stdout_path.open("a", encoding="utf-8")
+    stderr_handle = stderr_path.open("a", encoding="utf-8")
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=str(cwd),
+            env=env,
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            creationflags=creationflags,
+        )
+    except Exception:
+        stdout_handle.close()
+        stderr_handle.close()
+        raise
+
+    process._wei_stdout_handle = stdout_handle  # type: ignore[attr-defined]
+    process._wei_stderr_handle = stderr_handle  # type: ignore[attr-defined]
+    write_log(log_path, f"Started {name} pid={process.pid} cmd={command}")
+    return process
+
+
+def close_process_handles(process: subprocess.Popen) -> None:
+    for attr in ("_wei_stdout_handle", "_wei_stderr_handle"):
+        handle = getattr(process, attr, None)
+        if handle:
+            handle.close()
+
+
+def stop_process(entry: dict, process: subprocess.Popen, log_path: Path) -> None:
+    name = entry["name"]
+    if process.poll() is not None:
+        write_log(log_path, f"{name} already stopped with code {process.returncode}")
+        close_process_handles(process)
+        return
+
+    write_log(log_path, f"Stopping {name} pid={process.pid}")
+    try:
+        if os.name == "nt":
+            process.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            process.terminate()
+        process.wait(timeout=8)
+    except Exception:
+        process.kill()
+        process.wait(timeout=5)
+    finally:
+        write_log(log_path, f"Stopped {name} code={process.returncode}")
+        close_process_handles(process)
+
+
+def validate_config(config: dict) -> list[dict]:
+    processes = config.get("processes")
+    if not isinstance(processes, list) or not processes:
+        raise ValueError("Config must contain a non-empty 'processes' list.")
+    for item in processes:
+        if item.get("enabled", True) is False:
+            continue
+        if not item.get("name"):
+            raise ValueError("Each process must have a name.")
+        command = item.get("command")
+        if not isinstance(command, list) or not command:
+            raise ValueError(f"Process {item.get('name', '<unknown>')} must have a non-empty command list.")
+    return processes
+
+
+def main() -> int:
+    base_dir = app_dir()
+    config_name = "launcher_config.json"
+    config_path = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else base_dir / config_name
+    logs_dir = ensure_dir(base_dir / "launcher_logs")
+    log_path = logs_dir / "launcher.log"
+
+    write_log(log_path, f"Launcher started from {base_dir}")
+    write_log(log_path, f"Using config {config_path}")
+
+    config = load_config(config_path)
+    processes = validate_config(config)
+    started: list[tuple[dict, subprocess.Popen]] = []
+
+    try:
+        for entry in processes:
+            if entry.get("enabled", True) is False:
+                write_log(log_path, f"Skip disabled process: {entry.get('name', '<unknown>')}")
+                continue
+            process = spawn_process(entry, base_dir, logs_dir, log_path)
+            started.append((entry, process))
+
+            ready_url = str(entry.get("ready_url", "") or "").strip()
+            ready_timeout = int(entry.get("ready_timeout_sec", 0) or 0)
+            if ready_url and ready_timeout > 0:
+                wait_for_url(ready_url, ready_timeout, log_path, entry["name"])
+
+        write_log(log_path, "All processes started. Press Ctrl+C to stop them.")
+
+        while True:
+            dead = [(entry, process) for entry, process in started if process.poll() is not None]
+            if dead:
+                for entry, process in dead:
+                    write_log(log_path, f"{entry['name']} exited unexpectedly with code {process.returncode}")
+                return 1
+            time.sleep(1)
+    except KeyboardInterrupt:
+        write_log(log_path, "Received Ctrl+C, shutting down.")
+        return 0
+    finally:
+        for entry, process in reversed(started):
+            stop_process(entry, process, log_path)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
