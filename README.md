@@ -5,7 +5,7 @@
 当前版本的核心目标不是“单模型直接回答”，而是：
 - 先由调度员模型判断任务类型与复杂度
 - 再自动选择更合适的执行模型
-- 执行模型在受控权限下调用联网思考、本地执行、邮件等工具
+- 执行模型在受控权限下调用联网思考、本地执行、人工确认、长任务和邮件等工具
 
 ## 核心工作模式
 
@@ -37,6 +37,8 @@
   - 当前主要包括：
     - `online_research`
     - `ask_open_interpreter`
+    - `start_open_interpreter_job`
+    - `request_human_confirmation`
     - `send_email`
 
 ## 调度链路
@@ -123,9 +125,9 @@
 - `simple`
   - 允许：`send_email`
 - `standard`
-  - 允许：`online_research`、`send_email`
+  - 允许：`online_research`、`send_email`、`request_human_confirmation`
 - `advanced`
-  - 允许：`online_research`、`send_email`、`ask_open_interpreter`
+  - 允许：`online_research`、`send_email`、`ask_open_interpreter`、`start_open_interpreter_job`、`request_human_confirmation`
 - `local_execution=true`
   - 视为高级执行模式
   - 允许全部当前工具
@@ -133,7 +135,7 @@
 这样做的目的：
 - 简单任务不误触发本地执行
 - 普通任务不轻易操作本地电脑
-- 只有复杂任务或明确本地执行任务，才开放 `ask_open_interpreter`
+- 只有复杂任务或明确本地执行任务，才开放本地执行能力
 
 ## 当前能力
 
@@ -142,11 +144,26 @@
 - 联网思考与时效性问题回答
 - 发送邮件
 - 调用本地 `Open Interpreter` 执行代码或操作本地电脑
+- 人工确认后继续执行
+- 本地长任务后台执行与状态轮询
 - 登录鉴权
+- 流式返回执行事件
 - 工具轨迹展示
 - 更清晰的后端日志记录
 
-## 工具轨迹与日志
+## 人工确认与长任务
+
+当任务存在副作用或需要人工兜底时，Agent 可以调用 `request_human_confirmation`：
+- 后端生成 `confirmation_id`
+- 前端展示确认卡片
+- 用户确认或拒绝后，继续走 `/api/chat/confirm` 或 `/api/chat/confirm/stream`
+
+当本地执行耗时较长时，Agent 可以调用 `start_open_interpreter_job`：
+- 后端立即返回 `job_id`
+- 前端通过 `/api/jobs/{job_id}` 轮询状态
+- 支持 `/api/jobs/{job_id}/cancel` 发起取消
+
+## 工具轨迹、事件流与日志
 
 当前后端会记录结构化工具轨迹，前端会展示：
 - 工具标题
@@ -154,6 +171,22 @@
 - 执行状态
 - 使用的模型（如适用）
 - 原始输出内容
+
+流式模式下，前端还能收到这些事件：
+- `planner_started`
+- `planner_finished`
+- `research_started`
+- `research_finished`
+- `agent_started`
+- `agent_tool_plan`
+- `tool_started`
+- `tool_progress`
+- `tool_finished`
+- `tool_error`
+- `awaiting_confirmation`
+- `job_created`
+- `final_answer`
+- `run_failed`
 
 后端日志会记录：
 - 调度信号
@@ -179,6 +212,9 @@
 |   |-- auth_store.py
 |   |-- chat_helpers.py
 |   |-- dispatching.py
+|   |-- execution_context.py
+|   |-- human_loop.py
+|   |-- local_jobs.py
 |   |-- research_client.py
 |   |-- runtime_config.py
 |   |-- tools.py
@@ -220,7 +256,16 @@
 - `src/tools.py`
   - 邮件工具
   - 本地 `Open Interpreter` 工具
+  - 人工确认工具
+  - 长任务启动工具
   - agent 可调用的 `online_research` 工具封装
+- `src/execution_context.py`
+  - 运行时上下文绑定
+  - 事件发射器桥接
+- `src/human_loop.py`
+  - 人工确认请求的内存存储与状态更新
+- `src/local_jobs.py`
+  - 本地长任务状态存储、进度追加与取消控制
 - `src/chat_helpers.py`
   - 消息转换
   - 文本清洗
@@ -253,7 +298,13 @@ cp .env.example .env
 如果需要本地执行：
 - `OPEN_INTERPRETER_URL`
 - `OPEN_INTERPRETER_AUTH_KEY`
+- `OPEN_INTERPRETER_MODEL`
 - `OPEN_INTERPRETER_TIMEOUT`
+
+如果需要网页抓取 / 搜索辅助：
+- `SEARXNG_URL`
+- `FETCH_TEXT_LIMIT`
+- `SEARCH_RESULT_LIMIT`
 
 如果需要邮件：
 - `SMTP_HOST`
@@ -270,13 +321,35 @@ cp .env.example .env
 - `AUTH_COOKIE_NAME`
 - `AUTH_COOKIE_SECURE`
 - `AUTH_SESSION_TTL_DAYS`
+- `AUTH_PBKDF2_ITERATIONS`
+
+其他常用项：
+- `APP_HOST`
+- `APP_PORT`
+- `LOCAL_EXECUTION_MODEL`
+- `ONLINE_RESEARCH_MAX_TOKENS`
+- `SYSTEM_PROMPT_PATH`
+- `WEI_LOG_DIR`
 
 ## 本地启动
+
+Windows PowerShell：
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+python -m src.app
+```
+
+Linux / macOS：
 
 ```bash
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env
 ./deploy/start_server.sh
 ```
 
@@ -288,14 +361,23 @@ curl http://127.0.0.1:8000/health
 
 ## 接口说明
 
-核心接口：
+核心对话接口：
 - `POST /api/chat`
+- `POST /api/chat/stream`
 
 当前主要请求字段：
 - `messages`
 - `thread_id`
 - `include_tool_trace`
 - `local_execution`
+
+人工确认接口：
+- `POST /api/chat/confirm`
+- `POST /api/chat/confirm/stream`
+
+长任务接口：
+- `GET /api/jobs/{job_id}`
+- `POST /api/jobs/{job_id}/cancel`
 
 认证接口：
 - `POST /api/auth/login`
@@ -315,6 +397,11 @@ sudo systemctl restart wei-agent
 sudo systemctl status wei-agent
 ```
 
+注意：
+- `deploy/wei-agent.service` 默认读取 `/opt/wei/.env`
+- `deploy/start_server.sh` 会自动加载 `.env`
+- `.env.example` 中的默认路径更偏向 Linux 部署，Windows 本地开发可按需改成本机路径
+
 ## 排查建议
 
 ```bash
@@ -326,6 +413,7 @@ curl http://127.0.0.1:8000/health
 - 分层模型是否正确
 - 本地解释器是否已配置
 - SMTP 是否已配置
+- Redis 是否可用
 
 Redis 可用性：
 
@@ -339,3 +427,8 @@ redis-cli ping
 journalctl -u wei-agent -f
 tail -f /opt/wei/logs/wei_agent.log
 ```
+
+如果流式对话停在确认或任务阶段，优先检查：
+- 是否返回了 `awaiting_confirmation`
+- 是否生成了 `job_id`
+- 前端是否能正常访问确认和任务查询接口
