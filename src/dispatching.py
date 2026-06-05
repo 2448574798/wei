@@ -29,6 +29,20 @@ EMAIL_ACTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
+LOCAL_EXECUTION_PATTERN = re.compile(
+    r"(本地|本机|电脑|桌面|打开|启动|运行|执行代码|解释器|浏览器|记事本|计算器|文件|"
+    r"open local|on my computer|on my machine|local computer|local machine|"
+    r"open browser|open notepad|open calculator|run code|execute code)",
+    re.IGNORECASE,
+)
+FILE_OUTPUT_PATTERN = re.compile(
+    r"(写入|保存|生成.*文件|导出|另存为|保存到|文档|txt|md|markdown|excel|csv|pdf|桌面)",
+    re.IGNORECASE,
+)
+MULTI_STEP_PATTERN = re.compile(
+    r"(然后|之后|并且|同时|先.*再|整理.*写入|搜索.*写入|总结.*发送|并发送|再发送)",
+    re.IGNORECASE,
+)
 
 
 class PlannerDecision(BaseModel):
@@ -38,6 +52,18 @@ class PlannerDecision(BaseModel):
     search_query: str = Field(default="")
     answer_mode: Literal["grounded_summary", "tool_agent"] = Field(default="tool_agent")
     post_actions: list[Literal["send_email"]] = Field(default_factory=list)
+
+
+class DispatchSignals(BaseModel):
+    needs_latest_info: bool = False
+    needs_research: bool = False
+    needs_local_execution: bool = False
+    needs_file_output: bool = False
+    needs_email: bool = False
+    email_recipient_present: bool = False
+    has_time_reference: bool = False
+    is_multi_step: bool = False
+    complexity_hint: Literal["simple", "standard", "advanced"] = "standard"
 
 
 def format_cn_date(value: datetime) -> str:
@@ -66,11 +92,13 @@ def expand_relative_dates(text: str) -> str:
 
 
 def has_relative_date(text: str) -> bool:
-    return bool(re.search(r"今天|今日|明天|后天|昨天|昨日|\btoday\b|\btomorrow\b|\byesterday\b", text, re.IGNORECASE))
+    return bool(
+        re.search(r"今天|今日|明天|后天|昨天|昨日|\btoday\b|\btomorrow\b|\byesterday\b", text or "", re.IGNORECASE)
+    )
 
 
 def has_explicit_date(text: str) -> bool:
-    return bool(re.search(r"\d{4}[-/.年]\d{1,2}([-/\.月]\d{1,2})?", text))
+    return bool(re.search(r"\d{4}[-/.年]\d{1,2}([-/\.月]\d{1,2})?", text or ""))
 
 
 def extract_email_targets(user_text: str) -> list[str]:
@@ -87,33 +115,7 @@ def likely_needs_research(user_text: str) -> bool:
 
 
 def is_local_execution_intent(user_text: str) -> bool:
-    text = (user_text or "").lower()
-    keywords = [
-        "本地",
-        "本机",
-        "电脑",
-        "桌面",
-        "打开",
-        "启动",
-        "运行",
-        "执行代码",
-        "解释器",
-        "浏览器",
-        "记事本",
-        "计算器",
-        "文件",
-        "open local",
-        "on my computer",
-        "on my machine",
-        "local computer",
-        "local machine",
-        "open browser",
-        "open notepad",
-        "open calculator",
-        "run code",
-        "execute code",
-    ]
-    return any(keyword in text for keyword in keywords)
+    return bool(LOCAL_EXECUTION_PATTERN.search(user_text or ""))
 
 
 def should_prefer_local_execution(user_text: str, config=None) -> bool:
@@ -131,8 +133,13 @@ def infer_post_actions(user_text: str) -> list[str]:
     return []
 
 
-def classify_complexity_heuristic(user_text: str, local_execution: bool = False) -> Literal["simple", "standard", "advanced"]:
+def classify_complexity_heuristic(
+    user_text: str,
+    local_execution: bool = False,
+) -> Literal["simple", "standard", "advanced"]:
     text = user_text or ""
+    lowered = text.lower()
+
     if local_execution or is_local_execution_intent(text):
         return "advanced"
     if likely_needs_research(text):
@@ -155,9 +162,9 @@ def classify_complexity_heuristic(user_text: str, local_execution: bool = False)
     ]
     simple_markers = ["解释一下", "简要", "一句话", "翻译", "润色", "总结"]
 
-    if any(marker.lower() in text.lower() for marker in advanced_markers) or len(text) > 180:
+    if any(marker.lower() in lowered for marker in advanced_markers) or len(text) > 180:
         return "advanced"
-    if any(marker.lower() in text.lower() for marker in simple_markers) or len(text) < 40:
+    if any(marker.lower() in lowered for marker in simple_markers) or len(text) < 40:
         return "simple"
     return "standard"
 
@@ -185,7 +192,50 @@ def normalize_search_query(query: str, user_text: str) -> str:
     return expand_relative_dates(cleaned)
 
 
-def localize_planner_reason(reason: str, route: str, complexity: str, post_actions: list[str] | None = None) -> str:
+def collect_dispatch_signals(user_text: str, local_execution: bool = False) -> dict:
+    text = user_text or ""
+    recipients = extract_email_targets(text)
+    needs_latest_info = is_time_sensitive(text)
+    needs_local_execution = local_execution or is_local_execution_intent(text)
+    needs_file_output = bool(FILE_OUTPUT_PATTERN.search(text))
+    needs_email = bool(EMAIL_ACTION_PATTERN.search(text))
+    has_time_reference = needs_latest_info or has_relative_date(text) or has_explicit_date(text)
+    is_multi_step = bool(MULTI_STEP_PATTERN.search(text)) or sum(
+        [
+            1 if needs_latest_info else 0,
+            1 if needs_local_execution else 0,
+            1 if needs_file_output else 0,
+            1 if needs_email else 0,
+        ]
+    ) >= 2
+    needs_research = likely_needs_research(text) or (needs_latest_info and not needs_local_execution)
+
+    complexity_hint = classify_complexity_heuristic(text, local_execution)
+    if needs_local_execution and (needs_latest_info or needs_file_output or is_multi_step):
+        complexity_hint = "advanced"
+    elif needs_research and complexity_hint == "simple":
+        complexity_hint = "standard"
+
+    signals = DispatchSignals(
+        needs_latest_info=needs_latest_info,
+        needs_research=needs_research,
+        needs_local_execution=needs_local_execution,
+        needs_file_output=needs_file_output,
+        needs_email=needs_email,
+        email_recipient_present=bool(recipients),
+        has_time_reference=has_time_reference,
+        is_multi_step=is_multi_step,
+        complexity_hint=complexity_hint,
+    )
+    return signals.model_dump()
+
+
+def localize_planner_reason(
+    reason: str,
+    route: str,
+    complexity: str,
+    post_actions: list[str] | None = None,
+) -> str:
     text = (reason or "").strip()
     post_actions = post_actions or []
     if re.search(r"[\u4e00-\u9fff]", text):
@@ -255,8 +305,72 @@ def normalize_planner_decision(
         if not data.get("reason"):
             data["reason"] = "需要先完成思考，再继续执行后续动作。"
 
-    data["reason"] = localize_planner_reason(data.get("reason", ""), data.get("route", "agent"), data["complexity"], post_actions)
+    data["reason"] = localize_planner_reason(
+        data.get("reason", ""),
+        data.get("route", "agent"),
+        data["complexity"],
+        post_actions,
+    )
     return data
+
+
+def validate_dispatch_decision(
+    decision: PlannerDecision | dict,
+    signals: dict,
+    user_text: str,
+    local_execution: bool = False,
+) -> dict:
+    validated = normalize_planner_decision(decision, user_text, local_execution=local_execution)
+    complexity_hint = signals.get("complexity_hint", "standard")
+
+    if complexity_hint == "advanced" and validated.get("complexity") != "advanced":
+        validated["complexity"] = "advanced"
+    elif (
+        complexity_hint == "simple"
+        and validated.get("complexity") == "standard"
+        and not signals.get("needs_research")
+        and not signals.get("needs_local_execution")
+        and not signals.get("needs_file_output")
+        and not signals.get("is_multi_step")
+        and not signals.get("needs_email")
+    ):
+        validated["complexity"] = "simple"
+
+    if signals.get("needs_local_execution"):
+        validated["route"] = "agent"
+        validated["answer_mode"] = "tool_agent"
+        validated["complexity"] = "advanced"
+        validated["search_query"] = ""
+
+    if signals.get("needs_research") and not signals.get("needs_local_execution"):
+        validated["route"] = "research"
+        validated["answer_mode"] = "grounded_summary"
+        validated["search_query"] = normalize_search_query(validated.get("search_query", ""), user_text)
+
+    if signals.get("needs_email") and signals.get("email_recipient_present"):
+        if "send_email" not in validated.get("post_actions", []):
+            validated["post_actions"] = ["send_email"]
+
+    if signals.get("needs_file_output") and validated.get("complexity") == "simple":
+        validated["complexity"] = "advanced" if signals.get("needs_local_execution") else "standard"
+
+    if signals.get("is_multi_step") and validated.get("complexity") == "simple":
+        validated["complexity"] = "standard"
+
+    if signals.get("needs_latest_info") and signals.get("needs_local_execution"):
+        validated["route"] = "agent"
+        validated["answer_mode"] = "tool_agent"
+        validated["complexity"] = "advanced"
+        validated["search_query"] = ""
+        validated["reason"] = "请求同时涉及最新信息和本地操作，适合由高级执行模型先决定是否联网，再继续本地执行。"
+
+    validated["reason"] = localize_planner_reason(
+        validated.get("reason", ""),
+        validated.get("route", "agent"),
+        validated.get("complexity", "standard"),
+        validated.get("post_actions", []),
+    )
+    return validated
 
 
 def build_heuristic_planner_decision(user_text: str, local_execution: bool = False) -> dict:
@@ -288,15 +402,22 @@ def choose_execution_model(decision: dict | None, local_execution: bool = False)
     return EXECUTION_MODEL_STANDARD
 
 
-def build_dispatcher_prompt(user_text: str, today: str, local_execution: bool = False) -> list:
+def build_dispatcher_prompt(
+    user_text: str,
+    today: str,
+    signals: dict,
+    local_execution: bool = False,
+) -> list:
     return [
         SystemMessage(
             content=(
                 "你是任务调度员，只返回结构化决策。\n"
                 f"默认使用 {DISPATCHER_MODEL} 的调度能力，判断请求是否需要联网，以及任务复杂度。\n"
+                "你会同时看到用户原始请求和已提取的结构化信号。\n"
+                "请优先依据结构化信号做分类，而不是自由发挥。\n"
                 "规则如下：\n"
-                "1. 如果请求依赖当前、最新、会变化的信息，route 选 research。\n"
-                "2. 如果请求涉及本地电脑、本地程序、本地文件、浏览器操作或执行代码，route 选 agent，complexity 选 advanced。\n"
+                "1. 如果请求依赖当前、最新、会变化的信息，route 优先考虑 research。\n"
+                "2. 如果请求涉及本地电脑、本地程序、本地文件、浏览器操作或执行代码，route 优先考虑 agent，complexity 至少为 advanced。\n"
                 "3. complexity 只允许 simple、standard、advanced。\n"
                 "4. simple 适合简短问答、改写、翻译、轻量整理。\n"
                 "5. standard 适合普通分析、常规工具协作、多信息整合。\n"
@@ -311,8 +432,7 @@ def build_dispatcher_prompt(user_text: str, today: str, local_execution: bool = 
                 f"今天日期：{today}\n"
                 f"用户请求：{user_text}\n"
                 f"本地执行模式：{'开启' if local_execution else '关闭'}\n"
-                f"本地执行意图：{'是' if is_local_execution_intent(user_text) else '否'}\n"
-                f"时效性提示：{'是' if is_time_sensitive(user_text) else '否'}"
+                f"结构化信号：{signals}"
             )
         ),
     ]

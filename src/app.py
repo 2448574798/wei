@@ -36,12 +36,13 @@ from src.dispatching import (
     build_default_search_query,
     build_dispatcher_prompt,
     build_heuristic_planner_decision,
+    collect_dispatch_signals,
     choose_execution_model,
     infer_post_actions,
     is_local_execution_intent,
     is_time_sensitive,
-    normalize_planner_decision,
     should_prefer_local_execution,
+    validate_dispatch_decision,
 )
 from src.research_client import call_online_research_model
 from src.runtime_config import (
@@ -79,6 +80,7 @@ from src.web_helpers import (
 
 class AgentState(MessagesState):
     planner_decision: dict
+    dispatch_signals: dict
     research_result: str
     tool_trace: list[dict]
 
@@ -124,16 +126,19 @@ async def planner_node(state: AgentState, config=None):
     local_execution = request_context["local_execution"]
     user_text = get_latest_user_text(state["messages"])
     today = datetime.now().strftime("%Y-%m-%d")
+    signals = collect_dispatch_signals(user_text, local_execution=local_execution)
 
     if not user_text:
+        decision = validate_dispatch_decision(PlannerDecision(), signals, user_text, local_execution=local_execution)
         return {
-            "planner_decision": normalize_planner_decision(PlannerDecision(), user_text, local_execution=local_execution),
+            "planner_decision": decision,
+            "dispatch_signals": signals,
             "tool_trace": [],
             "research_result": "",
         }
 
     if should_prefer_local_execution(user_text, config):
-        decision = normalize_planner_decision(
+        decision = validate_dispatch_decision(
             {
                 "route": "agent",
                 "reason": "请求涉及本地执行或电脑操作，优先进入执行流程。",
@@ -142,12 +147,18 @@ async def planner_node(state: AgentState, config=None):
                 "answer_mode": "tool_agent",
                 "post_actions": infer_post_actions(user_text),
             },
+            signals,
             user_text,
             local_execution=True,
         )
-        return {"planner_decision": decision, "tool_trace": [], "research_result": ""}
+        return {
+            "planner_decision": decision,
+            "dispatch_signals": signals,
+            "tool_trace": [],
+            "research_result": "",
+        }
 
-    dispatcher_prompt = build_dispatcher_prompt(user_text, today, local_execution=local_execution)
+    dispatcher_prompt = build_dispatcher_prompt(user_text, today, signals, local_execution=local_execution)
     try:
         llm = get_llm(DISPATCHER_MODEL).with_structured_output(PlannerDecision)
         raw_decision = await llm.ainvoke(dispatcher_prompt)
@@ -155,25 +166,35 @@ async def planner_node(state: AgentState, config=None):
         logger.warning("Dispatcher model %s failed, using heuristic fallback: %s", DISPATCHER_MODEL, exc)
         raw_decision = build_heuristic_planner_decision(user_text, local_execution=local_execution)
 
-    decision = normalize_planner_decision(raw_decision, user_text, local_execution=local_execution)
+    raw_decision_payload = raw_decision.model_dump() if isinstance(raw_decision, PlannerDecision) else dict(raw_decision)
+    decision = validate_dispatch_decision(raw_decision, signals, user_text, local_execution=local_execution)
     logger.info(
-        "Dispatcher thread=%s user=%s route=%s complexity=%s reason=%s query=%s post_actions=%s local_execution=%s",
+        "Dispatcher thread=%s user=%s local_execution=%s signals=%s raw_decision=%s validated_decision=%s",
         request_context["thread_id"],
         request_context["username"],
-        decision["route"],
-        decision["complexity"],
-        decision["reason"],
-        decision["search_query"],
-        decision["post_actions"],
         local_execution,
+        signals,
+        raw_decision_payload,
+        decision,
     )
-    return {"planner_decision": decision, "tool_trace": [], "research_result": ""}
+    return {
+        "planner_decision": decision,
+        "dispatch_signals": signals,
+        "tool_trace": [],
+        "research_result": "",
+    }
 
 
 def route_after_planner(state: AgentState):
     decision = state.get("planner_decision") or {}
+    signals = state.get("dispatch_signals") or {}
     user_text = get_latest_user_text(state["messages"])
-    if decision.get("route") != "research" and is_time_sensitive(user_text) and not is_local_execution_intent(user_text):
+    if (
+        decision.get("route") != "research"
+        and (signals.get("needs_research") or is_time_sensitive(user_text))
+        and not signals.get("needs_local_execution")
+        and not is_local_execution_intent(user_text)
+    ):
         return "research"
     return decision.get("route", "agent")
 

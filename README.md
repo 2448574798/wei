@@ -1,8 +1,8 @@
 # Wei Agent
 
-`Wei Agent` 是一个基于 `FastAPI + LangGraph` 的分层调度型智能助手。  
-当前版本的核心目标不是“单模型直接回答”，而是：
+`Wei Agent` 是一个基于 `FastAPI + LangGraph` 的分层调度型智能助手。
 
+当前版本的核心目标不是“单模型直接回答”，而是：
 - 先由调度员模型判断任务类型与复杂度
 - 再自动选择更合适的执行模型
 - 执行模型在受控权限下调用联网思考、本地执行、邮件等工具
@@ -23,7 +23,6 @@
 ```
 
 说明：
-
 - `dispatcher`
   - 负责判断：
     - 是否需要联网
@@ -40,10 +39,55 @@
     - `ask_open_interpreter`
     - `send_email`
 
+## 调度链路
+
+当前调度采用三段式：
+
+```text
+信号提取 -> 模型调度 -> 结果校验
+```
+
+### 1. 信号提取
+
+先用代码规则提取稳定信号，例如：
+- `needs_latest_info`
+- `needs_research`
+- `needs_local_execution`
+- `needs_file_output`
+- `needs_email`
+- `email_recipient_present`
+- `has_time_reference`
+- `is_multi_step`
+- `complexity_hint`
+
+这一步的目标是先把自然语言压成更稳定的结构化特征，减少调度员自由发挥带来的漂移。
+
+### 2. 模型调度
+
+调度员默认使用 `gpt-4o-mini`，它会同时看到：
+- 用户原始请求
+- 已提取的结构化信号
+
+然后输出结构化决策：
+- `route`
+- `complexity`
+- `reason`
+- `search_query`
+- `post_actions`
+
+### 3. 结果校验
+
+模型输出后，后端会做一次二次校验和修正，例如：
+- 本地执行任务至少提升到 `advanced`
+- “最新信息 + 本地操作”的混合任务会优先交给 `agent`
+- 有明确邮箱且用户要求发送时，补齐 `send_email`
+- 简单任务会尽量回落到 `simple`
+
+这一步的目标是让高频场景更稳，不把所有判断都压在一次模型输出上。
+
 ## 分层调度
 
 默认模型分层如下：
-
 - `DISPATCHER_MODEL=gpt-4o-mini`
 - `EXECUTION_MODEL_SIMPLE=gpt-4o-mini`
 - `EXECUTION_MODEL_STANDARD=gpt-4o`
@@ -66,7 +110,6 @@
 ### 本地执行模式
 
 如果满足以下任一条件，会优先走本地执行主导路线：
-
 - 前端开启“本地执行模式”
 - 用户请求中明显包含本地操作意图，例如：
   - 打开浏览器
@@ -77,7 +120,6 @@
 ## 工具权限控制
 
 当前按复杂度限制工具权限：
-
 - `simple`
   - 允许：`send_email`
 - `standard`
@@ -88,8 +130,7 @@
   - 视为高级执行模式
   - 允许全部当前工具
 
-这样做的目的是：
-
+这样做的目的：
 - 简单任务不误触发本地执行
 - 普通任务不轻易操作本地电脑
 - 只有复杂任务或明确本地执行任务，才开放 `ask_open_interpreter`
@@ -97,7 +138,6 @@
 ## 当前能力
 
 当前系统支持：
-
 - 普通问答
 - 联网思考与时效性问题回答
 - 发送邮件
@@ -109,7 +149,6 @@
 ## 工具轨迹与日志
 
 当前后端会记录结构化工具轨迹，前端会展示：
-
 - 工具标题
 - 工具摘要
 - 执行状态
@@ -117,19 +156,19 @@
 - 原始输出内容
 
 后端日志会记录：
-
-- 调度结果
+- 调度信号
+- 原始调度结果
+- 校验后的调度结果
 - 执行模型选择
 - 计划调用哪些工具
-- 工具开始/结束
+- 工具开始 / 结束 / 失败
 - 最终回复摘要
 
 这有助于排查以下问题：
-
 - 调度员是否判断正确
 - 执行模型是否选对工具
 - 工具是否执行失败
-- 是不是被权限控制拦截
+- 是否被权限控制拦截
 
 ## 项目结构
 
@@ -172,9 +211,10 @@
   - 日志
   - LLM 初始化
 - `src/dispatching.py`
+  - 信号提取
   - 调度规则
   - 复杂度判断
-  - 本地执行意图识别
+  - 调度结果校验
 - `src/research_client.py`
   - 联网思考模型调用
 - `src/tools.py`
@@ -201,7 +241,6 @@ cp .env.example .env
 ```
 
 至少需要配置：
-
 - `ONE_API_URL`
 - `ONE_API_TOKEN`
 - `REDIS_URL`
@@ -212,13 +251,11 @@ cp .env.example .env
 - `ONLINE_RESEARCH_MODEL`
 
 如果需要本地执行：
-
 - `OPEN_INTERPRETER_URL`
 - `OPEN_INTERPRETER_AUTH_KEY`
 - `OPEN_INTERPRETER_TIMEOUT`
 
 如果需要邮件：
-
 - `SMTP_HOST`
 - `SMTP_PORT`
 - `SMTP_USER`
@@ -226,7 +263,6 @@ cp .env.example .env
 - `SMTP_FROM`
 
 如果需要登录：
-
 - `AUTH_DB_PATH`
 - `AUTH_ADMIN_USERNAME`
 - `AUTH_ADMIN_PASSWORD`
@@ -253,18 +289,15 @@ curl http://127.0.0.1:8000/health
 ## 接口说明
 
 核心接口：
-
 - `POST /api/chat`
 
 当前主要请求字段：
-
 - `messages`
 - `thread_id`
 - `include_tool_trace`
 - `local_execution`
 
 认证接口：
-
 - `POST /api/auth/login`
 - `POST /api/auth/logout`
 - `GET /api/auth/me`
@@ -289,7 +322,6 @@ curl http://127.0.0.1:8000/health
 ```
 
 重点查看：
-
 - token 是否配置
 - 分层模型是否正确
 - 本地解释器是否已配置
@@ -307,39 +339,3 @@ redis-cli ping
 journalctl -u wei-agent -f
 tail -f /opt/wei/logs/wei_agent.log
 ```
-
-## 前端说明
-
-前端静态资源位于 `static/`：
-
-- `index.html`
-  - 主页面
-- `login.html`
-  - 登录页
-- `app.js`
-  - 前端交互逻辑
-- `styles.css`
-  - 样式
-
-前端当前会展示：
-
-- 当前轮次的规划决策
-- 工具执行轨迹
-- 回复内容
-- 本地执行模式开关
-
-## 登录与后续扩展
-
-当前已具备基础登录能力：
-
-- 访问 `/login.html` 可登录
-- 未登录访问主页面会被重定向到登录页
-- `/api/chat` 需要登录后访问
-
-如果后续要扩展注册与用户级 `FRP / Open Interpreter` 绑定，可以沿现有用户表继续扩展：
-
-- 用户注册流程
-- 每个用户独立的 `frp_client_name`
-- 每个用户独立的 `frp_remote_port`
-- 每个用户独立的 `open_interpreter_url`
-- 与 `frps API` 的联动解析
