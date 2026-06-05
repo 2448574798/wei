@@ -66,7 +66,10 @@ def load_system_prompt() -> str:
     return DEFAULT_SYSTEM_PROMPT
 
 
+# Load the shared local env first, then let .env.local override sensitive
+# machine-specific values that should stay untracked.
 load_dotenv(BASE_DIR / ".env")
+load_dotenv(BASE_DIR / ".env.local")
 logger = configure_logger()
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
