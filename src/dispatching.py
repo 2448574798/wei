@@ -411,6 +411,42 @@ def build_dispatcher_prompt(
     return [
         SystemMessage(
             content=(
+                "你是任务调度器，只返回结构化决策。\n"
+                f"默认使用 {DISPATCHER_MODEL} 的调度能力，根据用户请求和结构化信号选择一个主执行者。\n"
+                "一次只能选择一个主执行者：route 只能是 research 或 agent，不能同时调度两个执行者，也不要设计成先 research 再 agent 的双执行者链路。\n"
+                "请优先依据结构化信号做分类，而不是自由发挥。\n"
+                "规则如下：\n"
+                "1. complexity 只能是 simple、standard、advanced。\n"
+                "2. simple 适合简短问答、改写、翻译、轻量整理；通常直接进入 agent，除非请求明确依赖最新或会变化的信息。\n"
+                "3. standard 适合普通分析、信息整合、常规工具协助；如果核心诉求是获取最新信息、查行情、查版本、查新闻，则优先选择 research。\n"
+                "4. advanced 适合复杂推理、多步任务、代码生成、本地执行、长链路任务；这类任务优先选择 agent。\n"
+                "5. 只要请求涉及本地电脑、本地程序、本地文件、浏览器操作或执行代码，route 优先选择 agent，complexity 至少为 advanced。\n"
+                "6. 如果你选择了 research，就表示本次主执行者是联网研究；只有在用户明确要求发送邮件且消息里已有收件邮箱时，post_actions 才能包含 send_email。\n"
+                "7. 如果你选择了 agent，就不要再把任务拆成“先 research 再 agent”的方案；search_query 必须留空。\n"
+                "8. 只有 route=research 时才填写 search_query，而且要简洁可用。\n"
+                "9. reason 用中文，保持简短，说明为什么选择这个主执行者和复杂度。"
+            )
+        ),
+        HumanMessage(
+            content=(
+                f"今天日期：{today}\n"
+                f"用户请求：{user_text}\n"
+                f"本地执行模式：{'开启' if local_execution else '关闭'}\n"
+                f"结构化信号：{signals}"
+            )
+        ),
+    ]
+
+
+def _legacy_build_dispatcher_prompt(
+    user_text: str,
+    today: str,
+    signals: dict,
+    local_execution: bool = False,
+) -> list:
+    return [
+        SystemMessage(
+            content=(
                 "你是任务调度员，只返回结构化决策。\n"
                 f"默认使用 {DISPATCHER_MODEL} 的调度能力，判断请求是否需要联网，以及任务复杂度。\n"
                 "你会同时看到用户原始请求和已提取的结构化信号。\n"

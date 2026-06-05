@@ -360,6 +360,13 @@ function updateLoadingMessage(wrapper, label) {
     }
 }
 
+function summarizeLoadingLabel(text, limit = 32) {
+    const compact = String(text || "").replace(/\s+/g, " ").trim();
+    if (!compact) return "";
+    if (compact.length <= limit) return compact;
+    return `${compact.slice(0, limit).trimEnd()}...`;
+}
+
 function appendLoadingProgress(wrapper, text) {
     if (!wrapper || !text) return;
     const progressEl = wrapper.querySelector(".loading-progress");
@@ -369,20 +376,65 @@ function appendLoadingProgress(wrapper, text) {
     item.textContent = text;
     progressEl.appendChild(item);
     progressEl.scrollTop = progressEl.scrollHeight;
+
+    const summary = summarizeLoadingLabel(text);
+    if (summary) {
+        updateLoadingMessage(wrapper, summary);
+    }
+}
+
+function setLoadingStage(wrapper, label, status = `${label}...`, type = "ok") {
+    updateLoadingMessage(wrapper, label);
+    setStatus(status, type);
+}
+
+function syncLoadingStage(wrapper, event, data = {}) {
+    if (!wrapper) return;
+
+    if (event === "planner_started") {
+        setLoadingStage(wrapper, "正在规划", "正在规划...", "ok");
+    } else if (event === "planner_finished") {
+        const route = plannerLabel(data.planner_decision?.route);
+        setLoadingStage(wrapper, `规划完成: ${route}`, "规划完成", "ok");
+    } else if (event === "research_started") {
+        const query = (data.query || "").trim();
+        setLoadingStage(wrapper, query ? `正在联网: ${query}` : "正在联网", "正在联网搜索...", "ok");
+    } else if (event === "research_finished") {
+        setLoadingStage(wrapper, "联网完成", "联网完成", "ok");
+    } else if (event === "agent_started") {
+        const complexity = complexityLabel(data.complexity || "standard");
+        setLoadingStage(wrapper, `正在执行: ${complexity}`, "正在执行任务...", "ok");
+    } else if (event === "agent_finished") {
+        setLoadingStage(wrapper, "正在整理回答", "正在整理回答...", "ok");
+    } else if (event === "agent_tool_plan") {
+        const names = (data.tools || []).map(toolLabel).filter(Boolean);
+        setLoadingStage(wrapper, names.length ? `准备调用: ${names.join("、")}` : "准备调用工具", "准备调用工具...", "ok");
+    } else if (event === "tool_started") {
+        const title = data.title || toolLabel(data.tool);
+        setLoadingStage(wrapper, `正在执行: ${title}`, `正在执行 ${title}...`, "ok");
+    } else if (event === "tool_progress") {
+        const title = toolLabel(data.tool);
+        const chunk = (data.chunk || "").trim().replace(/\s+/g, " ");
+        const preview = chunk ? chunk.slice(0, 24) : "";
+        setLoadingStage(wrapper, preview ? `${title}: ${preview}` : `正在执行: ${title}`, `正在执行 ${title}...`, "ok");
+    } else if (event === "tool_finished") {
+        const title = data.title || toolLabel(data.tool);
+        setLoadingStage(wrapper, `${title} 已完成`, `${title} 已完成`, data.status === "pending" ? "warn" : "ok");
+    } else if (event === "tool_error") {
+        const title = data.title || toolLabel(data.tool);
+        setLoadingStage(wrapper, `${title} 失败`, `${title} 执行失败`, "error");
+    } else if (event === "job_created") {
+        const title = data.job?.title || "本地长任务";
+        setLoadingStage(wrapper, `后台执行: ${title}`, "任务已转入后台执行", "ok");
+    } else if (event === "awaiting_confirmation") {
+        setLoadingStage(wrapper, "等待你的确认", "等待你的确认", "warn");
+    } else if (event === "run_failed") {
+        setLoadingStage(wrapper, "处理失败", data.detail || "处理失败", "error");
+    }
 }
 
 function startLoadingStageRotation(wrapper) {
-    const stages = [
-        { label: "正在规划", status: "正在规划..." },
-        { label: "正在思考", status: "正在思考..." },
-        { label: "正在整理回答", status: "正在整理回答..." },
-    ];
-
-    updateLoadingMessage(wrapper, stages[0].label);
-    setStatus(stages[0].status, "ok");
-
-    // Loading stages are advanced by real SSE events below instead of a timer,
-    // so the UI stays aligned with actual stream progress.
+    setLoadingStage(wrapper, "正在规划", "正在规划...", "ok");
     return () => {};
 }
 

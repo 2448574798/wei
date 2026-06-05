@@ -124,15 +124,18 @@ def get_request_context(config=None) -> dict:
 
 
 def get_allowed_tools(decision: dict | None, local_execution: bool) -> list:
+    route = (decision or {}).get("route", "agent")
     if local_execution:
-        return [online_research, send_email, ask_open_interpreter, start_open_interpreter_job, request_human_confirmation]
+        return [send_email, ask_open_interpreter, start_open_interpreter_job, request_human_confirmation]
 
     complexity = (decision or {}).get("complexity", "standard")
+    if route == "research":
+        return [send_email]
     if complexity == "simple":
         return [send_email]
     if complexity == "advanced":
-        return [online_research, send_email, ask_open_interpreter, start_open_interpreter_job, request_human_confirmation]
-    return [online_research, send_email, request_human_confirmation]
+        return [send_email, ask_open_interpreter, start_open_interpreter_job, request_human_confirmation]
+    return [send_email, request_human_confirmation]
 
 
 def get_allowed_tool_names(decision: dict | None, local_execution: bool) -> list[str]:
@@ -284,15 +287,6 @@ async def planner_node(state: AgentState, config=None):
 
 def route_after_planner(state: AgentState):
     decision = state.get("planner_decision") or {}
-    signals = state.get("dispatch_signals") or {}
-    user_text = get_latest_user_text(state["messages"])
-    if (
-        decision.get("route") != "research"
-        and (signals.get("needs_research") or is_time_sensitive(user_text))
-        and not signals.get("needs_local_execution")
-        and not is_local_execution_intent(user_text)
-    ):
-        return "research"
     return decision.get("route", "agent")
 
 
@@ -364,8 +358,9 @@ async def agent_node(state: AgentState, config=None):
     system_prompt = build_runtime_system_prompt()
     system_prompt += (
         "\n\nTool policy:\n"
-        "- Use online_research when the task depends on latest, current, changing, or externally verified information.\n"
-        "- If a task combines current information with local actions, first call online_research, then continue with ask_open_interpreter or send_email.\n"
+        "- Respect the dispatcher's single-executor decision for this run.\n"
+        "- If the dispatcher selected agent, do not try to switch back to online_research in the middle of execution.\n"
+        "- If the dispatcher selected research, answer from grounded research and only do explicit post-actions such as send_email when allowed.\n"
         "- Use ask_open_interpreter only when code execution or local computer actions are actually needed.\n"
         "- Pass runnable code directly to ask_open_interpreter, not natural-language instructions.\n"
         "- For side-effect actions such as opening apps, opening a browser, writing files, or launching programs, make the code print a short Chinese success message after the action completes.\n"
@@ -378,7 +373,6 @@ async def agent_node(state: AgentState, config=None):
         system_prompt += (
             "\n\nLocal execution policy:\n"
             "- The user is asking to operate their local computer or run local code.\n"
-            "- If the task still needs up-to-date external information, call online_research before local execution.\n"
             "- Strongly prefer ask_open_interpreter for these tasks instead of answering abstractly.\n"
             "- If you call ask_open_interpreter, provide complete runnable code.\n"
             "- When opening local apps, browsers, files, or performing side effects, include a final print statement in Chinese describing what succeeded.\n"
