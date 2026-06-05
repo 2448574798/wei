@@ -103,6 +103,22 @@ def get_request_context(config=None) -> dict:
     }
 
 
+def get_allowed_tools(decision: dict | None, local_execution: bool) -> list:
+    if local_execution:
+        return [online_research, send_email, ask_open_interpreter]
+
+    complexity = (decision or {}).get("complexity", "standard")
+    if complexity == "simple":
+        return [send_email]
+    if complexity == "advanced":
+        return [online_research, send_email, ask_open_interpreter]
+    return [online_research, send_email]
+
+
+def get_allowed_tool_names(decision: dict | None, local_execution: bool) -> list[str]:
+    return [tool.__name__ for tool in get_allowed_tools(decision, local_execution)]
+
+
 async def planner_node(state: AgentState, config=None):
     request_context = get_request_context(config)
     local_execution = request_context["local_execution"]
@@ -209,9 +225,11 @@ async def agent_node(state: AgentState, config=None):
     user_text = get_latest_user_text(state["messages"])
     decision = state.get("planner_decision") or {}
     model_name = choose_execution_model(decision, local_execution=local_execution)
+    allowed_tools = get_allowed_tools(decision, local_execution)
+    allowed_tool_names = [tool.__name__ for tool in allowed_tools]
 
     llm = get_llm(model_name)
-    llm_with_tools = llm.bind_tools([online_research, send_email, ask_open_interpreter])
+    llm_with_tools = llm.bind_tools(allowed_tools)
 
     system_prompt = build_runtime_system_prompt()
     system_prompt += (
@@ -223,6 +241,7 @@ async def agent_node(state: AgentState, config=None):
         "- For side-effect actions such as opening apps, opening a browser, writing files, or launching programs, make the code print a short Chinese success message after the action completes.\n"
         "- Do not return raw booleans like True or False when a clearer execution message can be printed.\n"
         "- Use send_email only when the user explicitly asks to send an email and a recipient is available.\n"
+        f"- Allowed tools for this run: {', '.join(allowed_tool_names) or 'none'}.\n"
         f"- The dispatcher selected complexity={decision.get('complexity', 'standard')} and executor model={model_name}. Respect that execution level.\n"
     )
     if local_execution or is_local_execution_intent(user_text):
@@ -249,13 +268,14 @@ async def agent_node(state: AgentState, config=None):
         messages = [system_msg] + messages[1:]
 
     logger.info(
-        "Agent start thread=%s user=%s model=%s route=%s complexity=%s local_execution=%s",
+        "Agent start thread=%s user=%s model=%s route=%s complexity=%s local_execution=%s allowed_tools=%s",
         request_context["thread_id"],
         request_context["username"],
         model_name,
         decision.get("route", "agent"),
         decision.get("complexity", "standard"),
         local_execution,
+        allowed_tool_names,
     )
     response = await llm_with_tools.ainvoke(messages)
     tool_calls = getattr(response, "tool_calls", None) or []
@@ -282,6 +302,60 @@ def should_continue_agent(state: AgentState):
     return "__end__"
 
 
+async def tools_node(state: AgentState, config=None):
+    request_context = get_request_context(config)
+    local_execution = request_context["local_execution"]
+    decision = state.get("planner_decision") or {}
+    allowed_tools = get_allowed_tools(decision, local_execution)
+    allowed_tool_names = [tool.__name__ for tool in allowed_tools]
+    last_message = state["messages"][-1]
+    requested_tools = [call.get("name", "") for call in (getattr(last_message, "tool_calls", None) or [])]
+
+    logger.info(
+        "Tools node thread=%s user=%s requested=%s allowed=%s",
+        request_context["thread_id"],
+        request_context["username"],
+        requested_tools,
+        allowed_tool_names,
+    )
+
+    unauthorized = [name for name in requested_tools if name and name not in allowed_tool_names]
+    if unauthorized:
+        logger.warning(
+            "Blocked unauthorized tools thread=%s user=%s unauthorized=%s allowed=%s",
+            request_context["thread_id"],
+            request_context["username"],
+            unauthorized,
+            allowed_tool_names,
+        )
+        unauthorized_text = "、".join(unauthorized)
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        f"当前任务复杂度或模式下不允许调用这些工具：{unauthorized_text}。"
+                        f"当前允许的工具是：{', '.join(allowed_tool_names) or '无'}。"
+                    )
+                )
+            ],
+            "tool_trace": append_tool_trace(
+                state.get("tool_trace"),
+                [
+                    make_trace_entry(
+                        "tool_guard",
+                        f"拦截未授权工具调用：{unauthorized_text}\n允许工具：{', '.join(allowed_tool_names) or '无'}",
+                        title="工具权限控制",
+                        phase="tool_guard",
+                        status="error",
+                        summary=f"已拦截未授权工具：{unauthorized_text}",
+                    )
+                ],
+            ),
+        }
+
+    return await ToolNode(allowed_tools).ainvoke(state, config=config)
+
+
 def build_agent_graph(checkpointer):
     from langgraph.graph import StateGraph
 
@@ -289,7 +363,7 @@ def build_agent_graph(checkpointer):
     workflow.add_node("planner", planner_node)
     workflow.add_node("online_research", online_research_node)
     workflow.add_node("agent", agent_node)
-    workflow.add_node("tools", ToolNode([online_research, send_email, ask_open_interpreter]))
+    workflow.add_node("tools", tools_node)
 
     workflow.set_entry_point("planner")
     workflow.add_conditional_edges("planner", route_after_planner, {"research": "online_research", "agent": "agent"})

@@ -132,6 +132,7 @@ function toolLabel(name) {
         send_email: "发送邮件",
         online_research: "联网思考",
         ask_open_interpreter: "本地解释器",
+        tool_guard: "工具权限控制",
     };
     return map[name] || name || "工具";
 }
