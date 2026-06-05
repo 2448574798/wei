@@ -1,31 +1,45 @@
 # Wei Agent
 
-`Wei Agent` 是一个基于 `FastAPI + LangGraph` 的智能助手服务，当前采用“先规划、再执行”的工作流。
+`Wei Agent` 是一个基于 `FastAPI + LangGraph` 的智能助手服务，当前采用“调度员先判断，再由合适模型执行”的工作流。
 
-## 功能概览
-
-- `planner` 默认使用低成本模型（如 `gpt-4o-mini`）先判断请求类型
-- 遇到时效性、最新信息、联网核实类问题时，会切到“思考”路径
-- “思考”路径使用支持联网搜索的模型完成信息获取与整理
-- 在需要时，可以继续执行后续动作，例如发送邮件
-
-## 当前执行流程
+## 核心流程
 
 整体流程如下：
 
 ```text
 用户请求
-  -> planner
+  -> dispatcher(gpt-4o-mini)
      -> agent
      -> online_research -> agent（可选）
 ```
 
 说明：
 
-- `planner`：判断是直接执行，还是先联网思考
-- `online_research`：调用支持联网的模型获取最新信息
-- `agent`：负责常规回答，以及调用如 `send_email` 这类工具
-- 如已配置 `OPEN_INTERPRETER_URL`，`agent` 还可以调用本地 Open Interpreter 服务执行代码
+- `dispatcher`：负责判断是否需要联网、任务复杂度、是否有后续动作。
+- `agent`：根据复杂度自动选择合适的执行模型，并负责工具调用。
+- `online_research`：调用支持联网搜索的模型获取最新信息。
+- 本地执行类任务会优先进入 `agent + ask_open_interpreter` 路线。
+
+## 分层调度
+
+默认使用以下模型分层：
+
+- `DISPATCHER_MODEL=gpt-4o-mini`
+- `EXECUTION_MODEL_SIMPLE=gpt-4o-mini`
+- `EXECUTION_MODEL_STANDARD=gpt-4o`
+- `EXECUTION_MODEL_ADVANCED=gpt-5.4`
+- `LOCAL_EXECUTION_MODEL=gpt-5.4`
+- `ONLINE_RESEARCH_MODEL=gpt-4o-mini-search-preview`
+
+前后端都不再提供手动模型选择功能，统一由调度员自动分配。
+
+## 当前能力
+
+- 普通问答
+- 联网思考与时效性问题回答
+- 发送邮件
+- 调用本地 `Open Interpreter` 执行代码或本地电脑操作
+- 登录鉴权
 
 ## 项目结构
 
@@ -33,6 +47,7 @@
 .
 |-- src/
 |   |-- app.py
+|   |-- auth_store.py
 |   `-- tools.py
 |-- deploy/
 |   |-- start_server.sh
@@ -42,6 +57,7 @@
 |   `-- system_prompt.txt
 |-- static/
 |   |-- index.html
+|   |-- login.html
 |   |-- app.js
 |   |-- styles.css
 |   `-- favicon.svg
@@ -52,23 +68,30 @@
 
 ## 环境变量
 
-先复制一份环境变量模板：
+先复制一份模板：
 
 ```bash
 cp .env.example .env
 ```
 
-至少需要配置这些项目：
+至少需要配置：
 
 - `ONE_API_URL`
 - `ONE_API_TOKEN`
 - `REDIS_URL`
-- `PLANNER_MODEL`
-- `AGENT_MODEL`
+- `DISPATCHER_MODEL`
+- `EXECUTION_MODEL_SIMPLE`
+- `EXECUTION_MODEL_STANDARD`
+- `EXECUTION_MODEL_ADVANCED`
 - `ONLINE_RESEARCH_MODEL`
-- `OPEN_INTERPRETER_URL`
 
-如果需要发送邮件，还需要配置：
+如果需要本地执行：
+
+- `OPEN_INTERPRETER_URL`
+- `OPEN_INTERPRETER_AUTH_KEY`
+- `OPEN_INTERPRETER_TIMEOUT`
+
+如果需要邮件：
 
 - `SMTP_HOST`
 - `SMTP_PORT`
@@ -76,10 +99,15 @@ cp .env.example .env
 - `SMTP_PASSWORD`
 - `SMTP_FROM`
 
-可选的 Open Interpreter 相关配置：
+如果需要登录：
 
-- `OPEN_INTERPRETER_AUTH_KEY`
-- `OPEN_INTERPRETER_TIMEOUT`
+- `AUTH_DB_PATH`
+- `AUTH_ADMIN_USERNAME`
+- `AUTH_ADMIN_PASSWORD`
+- `AUTH_ADMIN_DISPLAY_NAME`
+- `AUTH_COOKIE_NAME`
+- `AUTH_COOKIE_SECURE`
+- `AUTH_SESSION_TTL_DAYS`
 
 ## 本地启动
 
@@ -102,16 +130,22 @@ curl http://127.0.0.1:8000/health
 
 - `POST /api/chat`
 
-可选请求字段：
+当前主要请求字段：
 
-- `model`：主执行模型
-- `planner_model`：覆盖规划模型
-- `online_research_model`：覆盖联网思考模型
-- `include_tool_trace`：返回工具执行摘要
+- `messages`
+- `thread_id`
+- `include_tool_trace`
+- `local_execution`
+
+登录相关接口：
+
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+- `GET /api/auth/me`
 
 ## 部署
 
-`deploy/start_server.sh` 是统一启动入口，手动启动和 `systemd` 都走这一份脚本。
+统一使用：
 
 ```bash
 chmod +x /opt/wei/deploy/start_server.sh
@@ -125,54 +159,40 @@ sudo systemctl status wei-agent
 ## 排查建议
 
 - `curl http://127.0.0.1:8000/health`
-  检查 `one_api_token_configured`、`smtp_configured` 以及当前模型配置
+  检查 token、模型分层、本地解释器和 SMTP 是否已配置。
 - `redis-cli ping`
-  检查 Redis 是否可用
+  检查 Redis 是否可用。
 - `journalctl -u wei-agent -f`
-  实时查看服务日志
+  实时查看服务日志。
 
 ## 前端说明
 
 前端静态资源位于 `static/`：
 
-- `index.html`：页面结构
+- `index.html`：主页面
+- `login.html`：登录页
 - `app.js`：交互逻辑
-- `styles.css`：样式文件
+- `styles.css`：样式
 
 前端会展示：
 
-- 本轮规划结果
+- 当前轮次的规划决策
 - 工具执行轨迹
 - 回复内容
+- 本地执行模式开关
 
-其中用户可见文案已统一使用“思考”表达，不直接暴露内部 `research` 路由名。
+## 登录与后续扩展
 
-## 登录与会话
+当前版本已具备基础登录能力：
 
-当前版本已增加基础登录能力：
+- 访问 `/login.html` 可登录
+- 未登录访问主页面会被重定向到登录页
+- `/api/chat` 需要登录后访问
 
-- 访问 `/login.html` 可以进入登录页
-- 登录成功后会写入站点会话 cookie
-- 未登录访问主页面时，会自动跳转到登录页
-- `/api/chat` 现在要求先登录
+后续如果要扩展注册与用户级 FRP / 本地解释器绑定，可以直接沿现有用户表增加：
 
-默认通过环境变量种子初始化第一个管理员账号：
-
-- `AUTH_ADMIN_USERNAME`
-- `AUTH_ADMIN_PASSWORD`
-- `AUTH_ADMIN_DISPLAY_NAME`
-
-认证与数据相关配置：
-
-- `AUTH_DB_PATH`：本地 SQLite 用户与会话库路径
-- `AUTH_COOKIE_NAME`：登录 cookie 名称
-- `AUTH_COOKIE_SECURE`：在 HTTPS 环境建议设为 `true`
-- `AUTH_SESSION_TTL_DAYS`：登录会话有效天数
-
-后续如果要扩展注册能力，可以直接在现有用户表基础上增加：
-
-- 用户自定义密码注册
+- 用户注册流程
 - 每个用户独立的 `frp_client_name`
 - 每个用户独立的 `frp_remote_port`
 - 每个用户独立的 `open_interpreter_url`
-- 对接 `frps API` 后按登录用户解析其本地入口
+- 与 `frps API` 的联动解析

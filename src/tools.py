@@ -11,6 +11,9 @@ import requests
 from bs4 import BeautifulSoup
 from websockets.sync.client import connect
 
+from src.research_client import call_online_research_model
+from src.runtime_config import ONLINE_RESEARCH_MODEL
+
 
 logger = logging.getLogger("wei_agent")
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://127.0.0.1:8888")
@@ -168,6 +171,19 @@ def _format_open_interpreter_result(code: str, output: str) -> str:
     return normalized
 
 
+def online_research(question: str) -> str:
+    """Research current or changing information on the web and return a concise Chinese answer."""
+    text = (question or "").strip()
+    if not text:
+        return "联网思考问题不能为空。"
+    try:
+        logger.info("online_research tool start: %s", text[:200])
+        return call_online_research_model(text, text, ONLINE_RESEARCH_MODEL)
+    except Exception as exc:
+        logger.warning("online_research tool failed: %s", exc)
+        return f"联网思考失败：{exc}"
+
+
 def ask_open_interpreter(code: str, language: str = "python") -> str:
     """Execute already-prepared code with Open Interpreter.
 
@@ -189,6 +205,7 @@ def ask_open_interpreter(code: str, language: str = "python") -> str:
     auth_key = get_open_interpreter_auth_key()
     console_chunks: list[str] = []
     server_errors: list[str] = []
+    logger.info("ask_open_interpreter start: language=%s chars=%s", language, len(code))
 
     try:
         with connect(ws_url, open_timeout=min(timeout, 15), close_timeout=5) as ws:
@@ -248,9 +265,12 @@ def ask_open_interpreter(code: str, language: str = "python") -> str:
 
     output = "".join(console_chunks).strip()
     if output:
+        logger.info("ask_open_interpreter success: output_chars=%s", len(output))
         return _format_open_interpreter_result(code, output)
     if server_errors:
+        logger.warning("ask_open_interpreter server error: %s", server_errors[-1][:300])
         return f"Open Interpreter execution failed: {server_errors[-1][:1200]}"
+    logger.info("ask_open_interpreter completed without output")
     return "Open Interpreter returned no output."
 
 

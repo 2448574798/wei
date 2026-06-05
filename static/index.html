@@ -4,10 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Sunwin Agent</title>
-    <link rel="icon" href="./favicon.svg?v=20260604-2" type="image/svg+xml" />
-    <link rel="shortcut icon" href="./favicon.svg?v=20260604-2" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="./favicon.svg?v=20260604-2" />
-    <link rel="stylesheet" href="./styles.css?v=20260604-2" />
+    <link rel="icon" href="./favicon.svg?v=20260605-1" type="image/svg+xml" />
+    <link rel="shortcut icon" href="./favicon.svg?v=20260605-1" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./favicon.svg?v=20260605-1" />
+    <link rel="stylesheet" href="./styles.css?v=20260605-1" />
 </head>
 <body>
     <main class="app">
@@ -17,59 +17,11 @@
                     <div class="logo">sunw</div>
                     <div class="brand-copy">
                         <h1>Sunwin Agent</h1>
-                        <p>一个好用的工作流助手</p>
+                        <p>一个更适合真实工作流的智能助手</p>
                     </div>
                 </div>
 
                 <div class="toolbar">
-                    <div class="model-picker" id="modelPicker">
-                        <select id="modelSelect" class="model-select" aria-hidden="true" tabindex="-1">
-                            <option value="gpt-4o-mini">GPT-4o-mini</option>
-                            <option value="gpt-4o">GPT-4o</option>
-                            <option value="gpt-5.4">GPT-5.4</option>
-                            <option value="gpt-5.5">GPT-5.5</option>
-                        </select>
-
-                        <button id="modelTrigger" class="model-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
-                            <span class="model-copy">
-                                <span class="model-eyebrow">当前模型</span>
-                                <span class="model-main" id="modelCurrentName">GPT-4o-mini</span>
-                                <span class="model-sub" id="modelCurrentDesc">更快更省，适合日常问答与轻量工作流</span>
-                            </span>
-                            <span class="model-arrow">⌄</span>
-                        </button>
-
-                        <div class="model-menu" id="modelMenu" role="listbox">
-                            <button type="button" class="model-option" data-value="gpt-4o-mini">
-                                <span class="model-option-copy">
-                                    <span class="model-option-name">GPT-4o-mini</span>
-                                    <span class="model-option-desc">轻量、快速、成本低，适合作为默认交互模型</span>
-                                </span>
-                                <span class="model-option-badge">轻快</span>
-                            </button>
-                            <button type="button" class="model-option" data-value="gpt-4o">
-                                <span class="model-option-copy">
-                                    <span class="model-option-name">GPT-4o</span>
-                                    <span class="model-option-desc">更均衡，适合复杂一些的对话与工具协作</span>
-                                </span>
-                                <span class="model-option-badge">均衡</span>
-                            </button>
-                            <button type="button" class="model-option" data-value="gpt-5.4">
-                                <span class="model-option-copy">
-                                    <span class="model-option-name">GPT-5.4</span>
-                                    <span class="model-option-desc">更强的综合能力，适合高质量回答和较复杂流程</span>
-                                </span>
-                                <span class="model-option-badge">进阶</span>
-                            </button>
-                            <button type="button" class="model-option" data-value="gpt-5.5">
-                                <span class="model-option-copy">
-                                    <span class="model-option-name">GPT-5.5</span>
-                                    <span class="model-option-desc">更偏高性能场景，适合最重的推理和执行任务</span>
-                                </span>
-                                <span class="model-option-badge">高性能</span>
-                            </button>
-                        </div>
-                    </div>
                     <button id="localExecBtn" class="mode-switch" type="button" aria-pressed="false" aria-label="本地执行模式">
                         <span class="mode-switch-label">本地执行</span>
                         <span class="mode-switch-track" aria-hidden="true">
@@ -85,7 +37,7 @@
             <div class="messages" id="messages">
                 <div class="empty" id="emptyState">
                     <h2>需要我为你做点什么？</h2>
-                    <p>你可以直接提问，也可以让我搜索、总结，也可以帮你发送邮件。</p>
+                    <p>你可以直接提问，也可以让我联网思考、执行本地任务，或者帮你继续完成后续动作。</p>
                 </div>
             </div>
 
@@ -111,6 +63,6 @@
         </section>
     </main>
 
-    <script src="./app.js?v=20260604-2"></script>
+    <script src="./app.js?v=20260605-1"></script>
 </body>
 </html>
