@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Iterable
 
 
 def is_frozen() -> bool:
@@ -90,6 +91,53 @@ def build_env(extra_env: dict[str, str], base_dir: Path) -> dict[str, str]:
     return env
 
 
+def iter_listening_pids(port: int) -> list[int]:
+    if os.name != "nt":
+        return []
+
+    command = [
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        (
+            "Get-NetTCPConnection -LocalPort "
+            f"{port} -State Listen -ErrorAction SilentlyContinue | "
+            "Select-Object -ExpandProperty OwningProcess -Unique"
+        ),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        return []
+
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        text = line.strip()
+        if text.isdigit():
+            pids.append(int(text))
+    return pids
+
+
+def kill_ports(ports: Iterable[int], log_path: Path) -> None:
+    seen: set[int] = set()
+    for port in ports:
+        if port <= 0:
+            continue
+        for pid in iter_listening_pids(port):
+            if pid in seen or pid == os.getpid():
+                continue
+            seen.add(pid)
+            try:
+                write_log(log_path, f"Killing pid={pid} on port {port} before restart")
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except Exception as exc:
+                write_log(log_path, f"Failed to kill pid={pid} on port {port}: {exc}")
+
+
 def spawn_process(entry: dict, base_dir: Path, logs_dir: Path, log_path: Path) -> subprocess.Popen:
     name = entry["name"]
     command = [expand_value(part, base_dir) for part in entry["command"]]
@@ -165,6 +213,9 @@ def validate_config(config: dict) -> list[dict]:
         command = item.get("command")
         if not isinstance(command, list) or not command:
             raise ValueError(f"Process {item.get('name', '<unknown>')} must have a non-empty command list.")
+        ports = item.get("kill_ports", [])
+        if ports and not isinstance(ports, list):
+            raise ValueError(f"Process {item.get('name', '<unknown>')} kill_ports must be a list.")
     return processes
 
 
@@ -191,6 +242,7 @@ def main() -> int:
             if entry.get("enabled", True) is False:
                 write_log(log_path, f"Skip disabled process: {entry.get('name', '<unknown>')}")
                 continue
+            kill_ports([int(port) for port in entry.get("kill_ports", [])], log_path)
             process = spawn_process(entry, base_dir, logs_dir, log_path)
             started.append((entry, process))
 

@@ -378,20 +378,12 @@ function startLoadingStageRotation(wrapper) {
         { label: "正在整理回答", status: "正在整理回答..." },
     ];
 
-    let index = 0;
     updateLoadingMessage(wrapper, stages[0].label);
     setStatus(stages[0].status, "ok");
 
-    const timer = window.setInterval(() => {
-        index = Math.min(index + 1, stages.length - 1);
-        updateLoadingMessage(wrapper, stages[index].label);
-        setStatus(stages[index].status, "ok");
-        if (index >= stages.length - 1) {
-            window.clearInterval(timer);
-        }
-    }, 900);
-
-    return () => window.clearInterval(timer);
+    // Loading stages are advanced by real SSE events below instead of a timer,
+    // so the UI stays aligned with actual stream progress.
+    return () => {};
 }
 
 function parseSseBlock(block) {

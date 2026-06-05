@@ -3,6 +3,7 @@
     {
       "name": "frpc",
       "enabled": true,
+      "kill_ports": [],
       "command": [
         "{APP_DIR}\\bin\\frpc.exe",
         "-c",
@@ -16,6 +17,7 @@
     {
       "name": "open_interpreter",
       "enabled": true,
+      "kill_ports": [18000],
       "command": [
         "{APP_DIR}\\bin\\open-interpreter-server.exe"
       ],

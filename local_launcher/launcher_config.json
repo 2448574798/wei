@@ -3,6 +3,7 @@
     {
       "name": "frpc",
       "enabled": true,
+      "kill_ports": [],
       "command": [
         "D:\\Download\\frp_0.68.1_windows_amd64\\frp_0.68.1_windows_amd64\\frpc.exe",
         "-c",
@@ -16,6 +17,7 @@
     {
       "name": "open_interpreter",
       "enabled": true,
+      "kill_ports": [18000],
       "command": [
         "D:\\Download\\oi-env-310\\Scripts\\interpreter.exe",
         "--server"
