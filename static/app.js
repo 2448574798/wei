@@ -133,6 +133,8 @@ function toolLabel(name) {
         online_research: "联网思考",
         ask_open_interpreter: "本地解释器",
         tool_guard: "工具权限控制",
+        request_human_confirmation: "人工确认",
+        start_open_interpreter_job: "本地长任务",
     };
     return map[name] || name || "工具";
 }
@@ -307,6 +309,10 @@ function addMessage(role, content, options = {}) {
         wrapper.appendChild(traceBlock);
     }
 
+    if (meta?.awaitingConfirmation || meta?.pendingJob) {
+        appendInteractivePanel(wrapper, meta);
+    }
+
     messagesEl.appendChild(wrapper);
     messagesEl.scrollTop = messagesEl.scrollHeight;
 
@@ -327,14 +333,17 @@ function addLoadingMessage(label = "正在思考") {
     const bubble = document.createElement("div");
     bubble.className = "bubble";
     bubble.innerHTML = `
-        <p class="loading-bubble">
-            <span class="loading-label">${escapeHtml(label)}</span>
-            <span class="dots">
-                <span class="dot"></span>
-                <span class="dot"></span>
-                <span class="dot"></span>
-            </span>
-        </p>
+        <div class="loading-bubble">
+            <p class="loading-line">
+                <span class="loading-label">${escapeHtml(label)}</span>
+                <span class="dots">
+                    <span class="dot"></span>
+                    <span class="dot"></span>
+                    <span class="dot"></span>
+                </span>
+            </p>
+            <div class="loading-progress"></div>
+        </div>
     `;
 
     wrapper.appendChild(bubble);
@@ -349,6 +358,17 @@ function updateLoadingMessage(wrapper, label) {
     if (labelEl) {
         labelEl.textContent = label;
     }
+}
+
+function appendLoadingProgress(wrapper, text) {
+    if (!wrapper || !text) return;
+    const progressEl = wrapper.querySelector(".loading-progress");
+    if (!progressEl) return;
+    const item = document.createElement("div");
+    item.className = "loading-progress-item";
+    item.textContent = text;
+    progressEl.appendChild(item);
+    progressEl.scrollTop = progressEl.scrollHeight;
 }
 
 function startLoadingStageRotation(wrapper) {
@@ -374,6 +394,148 @@ function startLoadingStageRotation(wrapper) {
     return () => window.clearInterval(timer);
 }
 
+function parseSseBlock(block) {
+    const lines = block.split("\n");
+    let event = "message";
+    const dataLines = [];
+    lines.forEach((line) => {
+        if (line.startsWith("event:")) {
+            event = line.slice(6).trim();
+        } else if (line.startsWith("data:")) {
+            dataLines.push(line.slice(5).trim());
+        }
+    });
+    const raw = dataLines.join("\n");
+    return {
+        event,
+        data: raw ? JSON.parse(raw) : {},
+    };
+}
+
+async function consumeSseResponse(response, onEvent) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+
+    while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary >= 0) {
+            const block = buffer.slice(0, boundary).trim();
+            buffer = buffer.slice(boundary + 2);
+            if (block) {
+                const parsed = parseSseBlock(block);
+                await onEvent(parsed.event, parsed.data);
+            }
+            boundary = buffer.indexOf("\n\n");
+        }
+    }
+}
+
+function buildMessageMetaFromResponse(data) {
+    return {
+        plannerDecision: data.planner_decision || null,
+        toolTrace: data.tool_trace || [],
+        awaitingConfirmation: data.awaiting_confirmation || null,
+        pendingJob: data.pending_job || null,
+    };
+}
+
+function pollLocalJob(jobId, onUpdate, shouldContinue = () => true) {
+    let active = true;
+
+    (async () => {
+        while (active && shouldContinue()) {
+            const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
+                credentials: "same-origin",
+            });
+            if (!response.ok) {
+                break;
+            }
+            const job = await response.json();
+            onUpdate(job);
+            if (job.status === "completed" || job.status === "failed") {
+                break;
+            }
+            await new Promise((resolve) => window.setTimeout(resolve, 2000));
+        }
+    })().catch((error) => {
+        console.error("pollLocalJob failed", error);
+    });
+
+    return () => {
+        active = false;
+    };
+}
+
+function appendInteractivePanel(wrapper, meta) {
+    if (!wrapper || !meta) return;
+
+    if (meta.awaitingConfirmation) {
+        const panel = document.createElement("div");
+        panel.className = "interactive-panel";
+        panel.innerHTML = `
+            <div class="interactive-title">等待你的确认</div>
+            <div class="interactive-copy">${escapeHtml(meta.awaitingConfirmation.question || "")}</div>
+            ${meta.awaitingConfirmation.context ? `<div class="interactive-sub">${escapeHtml(meta.awaitingConfirmation.context)}</div>` : ""}
+            <textarea class="interactive-input" rows="2" placeholder="可选：补充说明"></textarea>
+            <div class="interactive-actions">
+                <button class="toolbar-btn" type="button" data-action="approve">继续执行</button>
+                <button class="toolbar-btn subtle" type="button" data-action="reject">取消执行</button>
+            </div>
+        `;
+        wrapper.appendChild(panel);
+        const inputEl = panel.querySelector(".interactive-input");
+        panel.querySelector('[data-action="approve"]').addEventListener("click", async () => {
+            await submitConfirmation(meta.awaitingConfirmation, true, inputEl.value.trim(), wrapper);
+        });
+        panel.querySelector('[data-action="reject"]').addEventListener("click", async () => {
+            await submitConfirmation(meta.awaitingConfirmation, false, inputEl.value.trim(), wrapper);
+        });
+    }
+
+    if (meta.pendingJob) {
+        const panel = document.createElement("div");
+        panel.className = "interactive-panel job-panel";
+        panel.innerHTML = `
+            <div class="interactive-title">本地长任务</div>
+            <div class="interactive-copy">${escapeHtml(meta.pendingJob.title || "")}</div>
+            <div class="interactive-sub">任务编号：${escapeHtml(meta.pendingJob.id || "")}</div>
+            <div class="interactive-sub job-status">状态：${escapeHtml(meta.pendingJob.status || "running")}</div>
+            <div class="interactive-log"></div>
+            <div class="interactive-actions">
+                <button class="toolbar-btn subtle" type="button" data-action="cancel-job">请求取消</button>
+            </div>
+        `;
+        wrapper.appendChild(panel);
+        const statusEl = panel.querySelector(".job-status");
+        const logEl = panel.querySelector(".interactive-log");
+        panel.querySelector('[data-action="cancel-job"]').addEventListener("click", async () => {
+            await fetch(`/api/jobs/${encodeURIComponent(meta.pendingJob.id)}/cancel`, {
+                method: "POST",
+                credentials: "same-origin",
+            });
+            statusEl.textContent = "状态：已请求取消";
+        });
+        const stopPolling = pollLocalJob(meta.pendingJob.id, (job) => {
+            statusEl.textContent = `状态：${job.status}`;
+            logEl.innerHTML = (job.progress || [])
+                .slice(-8)
+                .map((line) => `<div class="loading-progress-item">${escapeHtml(line)}</div>`)
+                .join("");
+            if (job.result) {
+                logEl.innerHTML += `<div class="loading-progress-item">${escapeHtml(job.result)}</div>`;
+            }
+            if (job.error) {
+                logEl.innerHTML += `<div class="loading-progress-item">${escapeHtml(job.error)}</div>`;
+            }
+        }, () => panel.isConnected);
+    }
+}
+
 function persistState() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(chatHistory));
     localStorage.setItem(LOCAL_EXEC_KEY, localExecutionMode ? "1" : "0");
@@ -397,6 +559,79 @@ function loadState() {
     chatHistory.forEach((item) => addMessage(item.role, item.content, { save: false, time: item.time, meta: item.meta || null }));
     updateEmptyState();
     updateLocalExecButton();
+}
+
+async function submitConfirmation(confirmation, approved, responseText, wrapper) {
+    if (!confirmation?.id || !confirmation?.thread_id) return;
+    const loadingEl = addLoadingMessage(approved ? "正在继续执行" : "正在处理中");
+    appendLoadingProgress(loadingEl, approved ? "已确认继续，正在恢复任务。" : "已拒绝继续，正在整理结果。");
+    setStatus(approved ? "正在继续执行..." : "正在处理中...", "ok");
+
+    try {
+        const payload = {
+            thread_id: confirmation.thread_id,
+            confirmation_id: confirmation.id,
+            approved,
+            response_text: responseText || "",
+            include_tool_trace: true,
+            local_execution: localExecutionMode,
+        };
+        const response = await fetch("/api/chat/confirm/stream", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+        }
+
+        let finalPayload = null;
+        await consumeSseResponse(response, async (event, data) => {
+            if (event === "planner_started") {
+                updateLoadingMessage(loadingEl, "正在规划");
+                appendLoadingProgress(loadingEl, "已重新进入调度。");
+            } else if (event === "planner_finished") {
+                appendLoadingProgress(loadingEl, `规划完成：${plannerLabel(data.planner_decision?.route)}`);
+            } else if (event === "research_started") {
+                updateLoadingMessage(loadingEl, "正在思考");
+                appendLoadingProgress(loadingEl, `联网思考：${data.query || ""}`);
+            } else if (event === "tool_started") {
+                appendLoadingProgress(loadingEl, `开始执行：${data.title || toolLabel(data.tool)}`);
+            } else if (event === "tool_progress") {
+                appendLoadingProgress(loadingEl, `${toolLabel(data.tool)}：${data.chunk}`);
+            } else if (event === "tool_finished") {
+                appendLoadingProgress(loadingEl, `${data.title || toolLabel(data.tool)}已完成`);
+            } else if (event === "tool_error") {
+                appendLoadingProgress(loadingEl, `${data.title || toolLabel(data.tool)}失败：${data.summary || ""}`);
+            } else if (event === "job_created") {
+                appendLoadingProgress(loadingEl, `已创建本地长任务：${data.job?.title || ""}`);
+            } else if (event === "awaiting_confirmation") {
+                appendLoadingProgress(loadingEl, "又出现新的确认点，等待用户继续。");
+            } else if (event === "final_answer") {
+                finalPayload = data;
+            } else if (event === "run_failed") {
+                throw new Error(data.detail || "处理失败");
+            }
+        });
+
+        loadingEl.remove();
+        if (wrapper) {
+            const panel = wrapper.querySelector(".interactive-panel");
+            if (panel) panel.remove();
+        }
+        if (finalPayload) {
+            addMessage("assistant", finalPayload.reply || "已处理完成。", {
+                meta: buildMessageMetaFromResponse(finalPayload),
+            });
+            setStatus("已完成确认后的继续执行");
+        }
+    } catch (error) {
+        loadingEl.remove();
+        addMessage("assistant", `确认后执行失败：${error.message}`);
+        setStatus(`确认后执行失败：${error.message}`, "error");
+    }
 }
 
 async function sendMessage() {
@@ -431,51 +666,90 @@ async function sendMessage() {
             payload.thread_id = threadId;
         }
 
-        const response = await fetch("/api/chat", {
+        const response = await fetch("/api/chat/stream", {
             method: "POST",
             credentials: "same-origin",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
         });
 
-        const data = await response.json().catch(() => ({}));
         if (!response.ok) {
-            throw new Error(data.detail || data.error || `HTTP ${response.status}`);
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
         }
 
-        if (data.thread_id) {
-            setThreadId(data.thread_id);
-        }
-
-        const meta = {
-            plannerDecision: data.planner_decision || null,
-            toolTrace: data.tool_trace || [],
-        };
-
-        const route = data.planner_decision?.route;
-        if (route === "research") {
-            updateLoadingMessage(loadingEl, "正在思考");
-            setStatus("正在思考...", "ok");
-        } else {
-            updateLoadingMessage(loadingEl, "正在整理回答");
-            setStatus("正在整理回答...", "ok");
-        }
+        let finalPayload = null;
+        await consumeSseResponse(response, async (event, data) => {
+            if (event === "planner_started") {
+                updateLoadingMessage(loadingEl, "正在规划");
+                appendLoadingProgress(loadingEl, "开始分析任务和结构化信号。");
+                setStatus("正在规划...", "ok");
+            } else if (event === "planner_finished") {
+                appendLoadingProgress(
+                    loadingEl,
+                    `规划完成：${plannerLabel(data.planner_decision?.route)} / ${complexityLabel(data.planner_decision?.complexity || "standard")}`,
+                );
+            } else if (event === "research_started") {
+                updateLoadingMessage(loadingEl, "正在思考");
+                appendLoadingProgress(loadingEl, `开始联网思考：${data.query || ""}`);
+                setStatus("正在思考...", "ok");
+            } else if (event === "research_finished") {
+                appendLoadingProgress(loadingEl, `联网思考完成：${data.summary || ""}`);
+            } else if (event === "agent_started") {
+                updateLoadingMessage(loadingEl, "正在整理回答");
+                appendLoadingProgress(
+                    loadingEl,
+                    `执行模型：${data.model || "-"} / 复杂度：${complexityLabel(data.complexity || "standard")}`,
+                );
+                setStatus("正在整理回答...", "ok");
+            } else if (event === "agent_tool_plan") {
+                appendLoadingProgress(loadingEl, `计划调用工具：${(data.tools || []).map(toolLabel).join("、") || "无"}`);
+            } else if (event === "tool_started") {
+                appendLoadingProgress(loadingEl, `开始执行：${data.title || toolLabel(data.tool)}`);
+            } else if (event === "tool_progress") {
+                appendLoadingProgress(loadingEl, `${toolLabel(data.tool)}：${data.chunk || ""}`);
+            } else if (event === "tool_finished") {
+                appendLoadingProgress(loadingEl, `${data.title || toolLabel(data.tool)}已完成`);
+            } else if (event === "tool_error") {
+                appendLoadingProgress(loadingEl, `${data.title || toolLabel(data.tool)}失败：${data.summary || ""}`);
+            } else if (event === "job_created") {
+                appendLoadingProgress(loadingEl, `已创建本地长任务：${data.job?.title || ""}`);
+            } else if (event === "awaiting_confirmation") {
+                updateLoadingMessage(loadingEl, "等待你的确认");
+                appendLoadingProgress(loadingEl, data.confirmation?.question || "出现新的确认点");
+                setStatus("等待你的确认", "warn");
+            } else if (event === "final_answer") {
+                finalPayload = data;
+            } else if (event === "run_failed") {
+                throw new Error(data.detail || "处理失败");
+            }
+        });
 
         stopLoadingStages();
         loadingEl.remove();
-        addMessage("assistant", data.reply || "无回复", { meta });
+        if (!finalPayload) {
+            throw new Error("未收到最终结果。");
+        }
+        if (finalPayload.thread_id) {
+            setThreadId(finalPayload.thread_id);
+        }
+        addMessage("assistant", finalPayload.reply || "无回复", {
+            meta: buildMessageMetaFromResponse(finalPayload),
+        });
 
-        const traceCount = data.tool_trace?.length || 0;
-        const complexity = data.planner_decision?.complexity ? `复杂度：${complexityLabel(data.planner_decision.complexity)}` : "";
+        const traceCount = finalPayload.tool_trace?.length || 0;
+        const complexity = finalPayload.planner_decision?.complexity
+            ? `复杂度：${complexityLabel(finalPayload.planner_decision.complexity)}`
+            : "";
         const statusSuffix = [
-            route ? `路由：${plannerLabel(route)}` : "",
+            finalPayload.planner_decision?.route ? `路由：${plannerLabel(finalPayload.planner_decision.route)}` : "",
             complexity,
             traceCount ? `工具：${traceCount}` : "",
             localExecutionMode ? "本地执行模式已生效" : "",
         ]
             .filter(Boolean)
-            .join(" · ");
-        setStatus(statusSuffix ? `回答完成 · ${statusSuffix}` : "回答完成");
+            .join(" / ");
+        setStatus(statusSuffix ? `回答完成 / ${statusSuffix}` : "回答完成");
     } catch (error) {
         stopLoadingStages();
         loadingEl.remove();

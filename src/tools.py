@@ -2,15 +2,20 @@ import logging
 import os
 import re
 import smtplib
+from contextlib import suppress
 from email.header import Header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from urllib.parse import urlparse
+import json
 
 import requests
 from bs4 import BeautifulSoup
 from websockets.sync.client import connect
 
+from src.execution_context import emit_runtime_event_sync, get_execution_context
+from src.human_loop import confirmation_store
+from src.local_jobs import local_job_store
 from src.research_client import call_online_research_model
 from src.runtime_config import ONLINE_RESEARCH_MODEL
 
@@ -40,6 +45,7 @@ REQUEST_HEADERS = {
     "Upgrade-Insecure-Requests": "1",
 }
 FETCH_BLOCKED_STATUS_CODES = {403, 429}
+META_PREFIX = "__WEI_META__:"
 
 
 def get_open_interpreter_url() -> str:
@@ -144,9 +150,20 @@ def _to_open_interpreter_ws_url(base_url: str) -> str:
 
 
 def _send_open_interpreter_payload(ws, payload: dict) -> None:
-    import json
-
     ws.send(json.dumps(payload))
+
+
+def encode_meta_payload(payload: dict) -> str:
+    return META_PREFIX + json.dumps(payload, ensure_ascii=False)
+
+
+def decode_meta_payload(text: str) -> dict | None:
+    content = (text or "").strip()
+    if not content.startswith(META_PREFIX):
+        return None
+    with suppress(Exception):
+        return json.loads(content[len(META_PREFIX) :])
+    return None
 
 
 def _format_open_interpreter_result(code: str, output: str) -> str:
@@ -184,14 +201,13 @@ def online_research(question: str) -> str:
         return f"联网思考失败：{exc}"
 
 
-def ask_open_interpreter(code: str, language: str = "python") -> str:
-    """Execute already-prepared code with Open Interpreter.
-
-    Pass runnable code directly, not natural-language instructions.
-    For side-effect tasks such as opening apps, launching a browser, or writing files,
-    prefer code that prints a short Chinese success message after execution.
-    Avoid returning raw booleans like True or False when a clearer status message can be printed.
-    """
+def _run_open_interpreter(
+    code: str,
+    *,
+    language: str = "python",
+    progress_callback=None,
+    cancel_check=None,
+) -> str:
     base_url = get_open_interpreter_url()
     if not base_url:
         return "Open Interpreter is not configured. Set OPEN_INTERPRETER_URL."
@@ -205,18 +221,14 @@ def ask_open_interpreter(code: str, language: str = "python") -> str:
     auth_key = get_open_interpreter_auth_key()
     console_chunks: list[str] = []
     server_errors: list[str] = []
-    logger.info("ask_open_interpreter start: language=%s chars=%s", language, len(code))
 
     try:
         with connect(ws_url, open_timeout=min(timeout, 15), close_timeout=5) as ws:
             _send_open_interpreter_payload(ws, {"auth": auth_key})
 
             authenticated = False
-            # Allow a few frames for auth / stale status frames.
             for _ in range(5):
                 raw = ws.recv(timeout=3)
-                import json
-
                 data = json.loads(raw)
                 if data.get("auth") is True:
                     authenticated = True
@@ -240,10 +252,11 @@ def ask_open_interpreter(code: str, language: str = "python") -> str:
             _send_open_interpreter_payload(ws, {"role": "user", "type": "command", "content": "go"})
             _send_open_interpreter_payload(ws, {"role": "user", "type": "command", "end": True})
 
-            for _ in range(80):
-                raw = ws.recv(timeout=8)
-                import json
+            for _ in range(300):
+                if cancel_check and cancel_check():
+                    return "本地任务已收到取消请求，执行器正在停止。"
 
+                raw = ws.recv(timeout=8)
                 data = json.loads(raw)
                 msg_type = data.get("type")
                 msg_format = data.get("format")
@@ -252,6 +265,8 @@ def ask_open_interpreter(code: str, language: str = "python") -> str:
                     text = str(data.get("content", ""))
                     if text:
                         console_chunks.append(text)
+                        if progress_callback:
+                            progress_callback(text)
                 elif msg_type == "error":
                     server_errors.append(str(data.get("content", "")).strip())
                 elif msg_type == "console" and msg_format == "active_line" and data.get("content") is None:
@@ -265,13 +280,93 @@ def ask_open_interpreter(code: str, language: str = "python") -> str:
 
     output = "".join(console_chunks).strip()
     if output:
-        logger.info("ask_open_interpreter success: output_chars=%s", len(output))
         return _format_open_interpreter_result(code, output)
     if server_errors:
         logger.warning("ask_open_interpreter server error: %s", server_errors[-1][:300])
         return f"Open Interpreter execution failed: {server_errors[-1][:1200]}"
-    logger.info("ask_open_interpreter completed without output")
     return "Open Interpreter returned no output."
+
+
+def summarize_console_chunk(text: str, limit: int = 160) -> str:
+    compact = re.sub(r"\s+", " ", (text or "").strip())
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit].rstrip() + "..."
+
+
+def ask_open_interpreter(code: str, language: str = "python") -> str:
+    """Execute already-prepared code with Open Interpreter.
+
+    Pass runnable code directly, not natural-language instructions.
+    For side-effect tasks such as opening apps, launching a browser, or writing files,
+    prefer code that prints a short Chinese success message after execution.
+    Avoid returning raw booleans like True or False when a clearer status message can be printed.
+    """
+    logger.info("ask_open_interpreter start: language=%s chars=%s", language, len(code))
+    result = _run_open_interpreter(
+        code,
+        language=language,
+        progress_callback=lambda chunk: emit_runtime_event_sync(
+            "tool_progress",
+            {
+                "tool": "ask_open_interpreter",
+                "title": "本地解释器",
+                "chunk": summarize_console_chunk(chunk),
+            },
+        ),
+    )
+    if result and "failed" not in result.lower():
+        logger.info("ask_open_interpreter success: output_chars=%s", len(result))
+    else:
+        logger.info("ask_open_interpreter completed with result: %s", result[:240])
+    return result
+
+
+def request_human_confirmation(question: str, context: str = "") -> str:
+    """Pause execution and ask the user for confirmation before continuing."""
+    prompt = (question or "").strip()
+    if not prompt:
+        return "确认问题不能为空。"
+
+    runtime = get_execution_context()
+    request_data = confirmation_store.create(
+        thread_id=runtime.get("thread_id", ""),
+        user_id=runtime.get("user_id"),
+        username=runtime.get("username", ""),
+        question=prompt,
+        context=(context or "").strip(),
+        local_execution=bool(runtime.get("local_execution")),
+    )
+    emit_runtime_event_sync("awaiting_confirmation", {"confirmation": request_data})
+    return encode_meta_payload({"kind": "confirmation_request", "confirmation": request_data})
+
+
+def start_open_interpreter_job(code: str, language: str = "python", title: str = "本地长任务") -> str:
+    """Start a long-running local Open Interpreter job and return a job id immediately."""
+    runtime = get_execution_context()
+    job = local_job_store.create(
+        title=title,
+        thread_id=runtime.get("thread_id", ""),
+        user_id=runtime.get("user_id"),
+        username=runtime.get("username", ""),
+    )
+    job_id = job["id"]
+
+    def progress_callback(chunk: str) -> None:
+        summary = summarize_console_chunk(chunk)
+        if summary:
+            local_job_store.append_progress(job_id, summary)
+
+    local_job_store.run_in_background(
+        job_id,
+        _run_open_interpreter,
+        code,
+        language=language,
+        progress_callback=progress_callback,
+        cancel_check=lambda: local_job_store.is_cancel_requested(job_id),
+    )
+    emit_runtime_event_sync("job_created", {"job": local_job_store.get(job_id)})
+    return encode_meta_payload({"kind": "job_created", "job": local_job_store.get(job_id)})
 
 
 def send_email(to: str, subject: str, body: str) -> str:

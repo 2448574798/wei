@@ -19,6 +19,15 @@ class ChatRequestPayload(BaseModel):
     local_execution: bool = False
 
 
+class ConfirmationPayload(BaseModel):
+    thread_id: str
+    confirmation_id: str
+    approved: bool = True
+    response_text: str = Field(default="")
+    include_tool_trace: bool = True
+    local_execution: bool = False
+
+
 def serialize_user(user: dict, include_bindings: bool = True) -> dict:
     payload = {
         "id": user["id"],

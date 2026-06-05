@@ -1,9 +1,11 @@
+import asyncio
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, SystemMessage
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from langgraph.graph import MessagesState
@@ -23,6 +25,7 @@ from src.chat_helpers import (
     append_tool_trace,
     build_tool_trace,
     convert_to_langchain,
+    default_tool_title,
     format_trace_content,
     get_latest_user_text,
     make_trace_entry,
@@ -31,6 +34,7 @@ from src.chat_helpers import (
     summarize_text,
     validate_chat_messages,
 )
+from src.execution_context import bind_execution_context, emit_runtime_event
 from src.dispatching import (
     PlannerDecision,
     build_default_search_query,
@@ -44,6 +48,8 @@ from src.dispatching import (
     should_prefer_local_execution,
     validate_dispatch_decision,
 )
+from src.human_loop import confirmation_store
+from src.local_jobs import local_job_store
 from src.research_client import call_online_research_model
 from src.runtime_config import (
     APP_HOST,
@@ -64,9 +70,19 @@ from src.runtime_config import (
     limiter,
     logger,
 )
-from src.tools import ask_open_interpreter, online_research, open_interpreter_is_configured, send_email, smtp_is_configured
+from src.tools import (
+    ask_open_interpreter,
+    decode_meta_payload,
+    online_research,
+    open_interpreter_is_configured,
+    request_human_confirmation,
+    send_email,
+    smtp_is_configured,
+    start_open_interpreter_job,
+)
 from src.web_helpers import (
     ChatRequestPayload,
+    ConfirmationPayload,
     LoginPayload,
     build_graph_config,
     ensure_thread_id,
@@ -83,6 +99,8 @@ class AgentState(MessagesState):
     dispatch_signals: dict
     research_result: str
     tool_trace: list[dict]
+    awaiting_confirmation: dict | None
+    pending_job: dict | None
 
 
 def build_runtime_system_prompt() -> str:
@@ -107,18 +125,91 @@ def get_request_context(config=None) -> dict:
 
 def get_allowed_tools(decision: dict | None, local_execution: bool) -> list:
     if local_execution:
-        return [online_research, send_email, ask_open_interpreter]
+        return [online_research, send_email, ask_open_interpreter, start_open_interpreter_job, request_human_confirmation]
 
     complexity = (decision or {}).get("complexity", "standard")
     if complexity == "simple":
         return [send_email]
     if complexity == "advanced":
-        return [online_research, send_email, ask_open_interpreter]
-    return [online_research, send_email]
+        return [online_research, send_email, ask_open_interpreter, start_open_interpreter_job, request_human_confirmation]
+    return [online_research, send_email, request_human_confirmation]
 
 
 def get_allowed_tool_names(decision: dict | None, local_execution: bool) -> list[str]:
     return [tool.__name__ for tool in get_allowed_tools(decision, local_execution)]
+
+
+async def emit_agent_event(event_type: str, **payload) -> None:
+    await emit_runtime_event(event_type, payload)
+
+
+def sanitize_final_reply(result: dict) -> str:
+    awaiting_confirmation = result.get("awaiting_confirmation")
+    pending_job = result.get("pending_job")
+    final_message = result["messages"][-1]
+    raw_reply = final_message.content if hasattr(final_message, "content") else str(final_message)
+    if isinstance(raw_reply, str) and decode_meta_payload(raw_reply):
+        if awaiting_confirmation:
+            return f"需要你的确认后我再继续。\n\n{awaiting_confirmation.get('question', '')}"
+        if pending_job:
+            return f"已创建本地长任务：{pending_job.get('title', '本地长任务')}。任务编号：{pending_job.get('id', '')}"
+    return remove_urls(raw_reply)
+
+
+def collect_response_payload(result: dict, *, thread_id: str, new_thread: bool, include_tool_trace: bool) -> dict:
+    tool_trace_entries = (result.get("tool_trace") or []) + build_tool_trace(result["messages"])
+    reply = sanitize_final_reply(result)
+    response = {
+        "reply": reply,
+        "thread_id": thread_id,
+        "planner_decision": public_planner_decision(result.get("planner_decision", {})),
+        "awaiting_confirmation": result.get("awaiting_confirmation"),
+        "pending_job": result.get("pending_job"),
+    }
+    if include_tool_trace:
+        response["tool_trace"] = tool_trace_entries
+    if new_thread:
+        response["new_thread"] = True
+    return response
+
+
+async def process_graph_run(
+    *,
+    langchain_messages: list,
+    config: dict,
+    current_user: dict,
+    thread_id: str,
+    include_tool_trace: bool,
+    new_thread: bool,
+    event_async_emitter=None,
+    event_sync_emitter=None,
+) -> dict:
+    context = {
+        "thread_id": thread_id,
+        "user_id": current_user["id"],
+        "username": current_user["username"],
+        "local_execution": bool(config.get("configurable", {}).get("local_execution")),
+    }
+    with bind_execution_context(context, async_emitter=event_async_emitter, sync_emitter=event_sync_emitter):
+        result = await app.state.graph.ainvoke({"messages": langchain_messages}, config=config)
+
+    response = collect_response_payload(
+        result,
+        thread_id=thread_id,
+        new_thread=new_thread,
+        include_tool_trace=include_tool_trace,
+    )
+    tool_trace_entries = response.get("tool_trace", [])
+    logger.info(
+        "Chat completed thread=%s user=%s route=%s complexity=%s tools=%s reply=%s",
+        thread_id,
+        current_user["username"],
+        (result.get("planner_decision") or {}).get("route", "agent"),
+        (result.get("planner_decision") or {}).get("complexity", "standard"),
+        [entry.get("tool") for entry in tool_trace_entries],
+        summarize_text(response["reply"], 120),
+    )
+    return response
 
 
 async def planner_node(state: AgentState, config=None):
@@ -127,6 +218,7 @@ async def planner_node(state: AgentState, config=None):
     user_text = get_latest_user_text(state["messages"])
     today = datetime.now().strftime("%Y-%m-%d")
     signals = collect_dispatch_signals(user_text, local_execution=local_execution)
+    await emit_agent_event("planner_started", message="正在规划", user_text=user_text, local_execution=local_execution)
 
     if not user_text:
         decision = validate_dispatch_decision(PlannerDecision(), signals, user_text, local_execution=local_execution)
@@ -177,6 +269,11 @@ async def planner_node(state: AgentState, config=None):
         raw_decision_payload,
         decision,
     )
+    await emit_agent_event(
+        "planner_finished",
+        planner_decision=public_planner_decision(decision),
+        dispatch_signals=signals,
+    )
     return {
         "planner_decision": decision,
         "dispatch_signals": signals,
@@ -211,6 +308,12 @@ async def online_research_node(state: AgentState, config=None):
         ONLINE_RESEARCH_MODEL,
         query,
     )
+    await emit_agent_event(
+        "research_started",
+        model=ONLINE_RESEARCH_MODEL,
+        query=query,
+        title="联网思考",
+    )
     answer = call_online_research_model(user_text, query, ONLINE_RESEARCH_MODEL)
     trace_entry = make_trace_entry(
         "online_research",
@@ -225,6 +328,12 @@ async def online_research_node(state: AgentState, config=None):
         request_context["thread_id"],
         request_context["username"],
         len(answer),
+    )
+    await emit_agent_event(
+        "research_finished",
+        model=ONLINE_RESEARCH_MODEL,
+        query=query,
+        summary=summarize_text(answer, 180),
     )
     return {
         "messages": [AIMessage(content=answer)],
@@ -298,6 +407,13 @@ async def agent_node(state: AgentState, config=None):
         local_execution,
         allowed_tool_names,
     )
+    await emit_agent_event(
+        "agent_started",
+        model=model_name,
+        route=decision.get("route", "agent"),
+        complexity=decision.get("complexity", "standard"),
+        allowed_tools=allowed_tool_names,
+    )
     response = await llm_with_tools.ainvoke(messages)
     tool_calls = getattr(response, "tool_calls", None) or []
     if tool_calls:
@@ -307,12 +423,18 @@ async def agent_node(state: AgentState, config=None):
             request_context["username"],
             [call.get("name", "") for call in tool_calls],
         )
+        await emit_agent_event(
+            "agent_tool_plan",
+            model=model_name,
+            tools=[call.get("name", "") for call in tool_calls],
+        )
     else:
         logger.info(
             "Agent completed without tool call thread=%s user=%s",
             request_context["thread_id"],
             request_context["username"],
         )
+        await emit_agent_event("agent_finished", model=model_name, summary=summarize_text(response.content if hasattr(response, "content") else str(response), 160))
     return {"messages": [response]}
 
 
@@ -339,6 +461,8 @@ async def tools_node(state: AgentState, config=None):
         requested_tools,
         allowed_tool_names,
     )
+    for name in requested_tools:
+        await emit_agent_event("tool_started", tool=name, title=default_tool_title(name))
 
     unauthorized = [name for name in requested_tools if name and name not in allowed_tool_names]
     if unauthorized:
@@ -374,7 +498,74 @@ async def tools_node(state: AgentState, config=None):
             ),
         }
 
-    return await ToolNode(allowed_tools).ainvoke(state, config=config)
+    result = await ToolNode(allowed_tools).ainvoke(state, config=config)
+    new_messages = result.get("messages") or []
+    extra_trace_entries = []
+    awaiting_confirmation = None
+    pending_job = None
+
+    for message in new_messages:
+        tool_name = getattr(message, "name", "") or "tool"
+        content = str(getattr(message, "content", "") or "")
+        meta = decode_meta_payload(content)
+        status = "error" if any(token in content.lower() for token in ["failed", "error", "not configured"]) else "ok"
+
+        if meta and meta.get("kind") == "confirmation_request":
+            awaiting_confirmation = meta.get("confirmation")
+            extra_trace_entries.append(
+                make_trace_entry(
+                    tool_name,
+                    f"确认问题：{awaiting_confirmation.get('question', '')}\n补充上下文：{awaiting_confirmation.get('context', '')}",
+                    title="等待人工确认",
+                    phase="human_loop",
+                    status="pending",
+                    summary=awaiting_confirmation.get("question", "等待人工确认"),
+                )
+            )
+            await emit_agent_event("awaiting_confirmation", confirmation=awaiting_confirmation)
+            await emit_agent_event("tool_finished", tool=tool_name, title="等待人工确认", status="pending")
+            continue
+
+        if meta and meta.get("kind") == "job_created":
+            pending_job = meta.get("job")
+            extra_trace_entries.append(
+                make_trace_entry(
+                    tool_name,
+                    f"任务标题：{pending_job.get('title', '')}\n任务编号：{pending_job.get('id', '')}",
+                    title="本地长任务",
+                    phase="local_job",
+                    status="pending",
+                    summary=f"已创建本地长任务：{pending_job.get('title', '')}",
+                )
+            )
+            await emit_agent_event("job_created", job=pending_job)
+            await emit_agent_event("tool_finished", tool=tool_name, title="本地长任务", status="pending")
+            continue
+
+        await emit_agent_event(
+            "tool_finished" if status == "ok" else "tool_error",
+            tool=tool_name,
+            title=default_tool_title(tool_name),
+            status=status,
+            summary=summarize_text(content, 160),
+        )
+
+    tool_trace = state.get("tool_trace")
+    if extra_trace_entries:
+        tool_trace = append_tool_trace(tool_trace, extra_trace_entries)
+
+    return {
+        **result,
+        "tool_trace": tool_trace,
+        "awaiting_confirmation": awaiting_confirmation,
+        "pending_job": pending_job,
+    }
+
+
+def route_after_tools(state: AgentState):
+    if state.get("awaiting_confirmation") or state.get("pending_job"):
+        return "__end__"
+    return "agent"
 
 
 def build_agent_graph(checkpointer):
@@ -390,7 +581,7 @@ def build_agent_graph(checkpointer):
     workflow.add_conditional_edges("planner", route_after_planner, {"research": "online_research", "agent": "agent"})
     workflow.add_conditional_edges("online_research", route_after_online_research, {"agent": "agent", "__end__": "__end__"})
     workflow.add_conditional_edges("agent", should_continue_agent, {"tools": "tools", "__end__": "__end__"})
-    workflow.add_edge("tools", "agent")
+    workflow.add_conditional_edges("tools", route_after_tools, {"agent": "agent", "__end__": "__end__"})
     return workflow.compile(checkpointer=checkpointer)
 
 
@@ -411,6 +602,66 @@ def build_health_payload() -> dict:
         "smtp_configured": smtp_is_configured(),
         "open_interpreter_configured": open_interpreter_is_configured(),
     }
+
+
+def build_sse_event(event_type: str, payload: dict) -> str:
+    return f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+async def stream_graph_run(
+    *,
+    langchain_messages: list,
+    config: dict,
+    current_user: dict,
+    thread_id: str,
+    include_tool_trace: bool,
+    new_thread: bool,
+):
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    finished = asyncio.Event()
+
+    async def async_emitter(event_type: str, payload: dict):
+        await queue.put({"type": event_type, "payload": payload})
+
+    def sync_emitter(event_type: str, payload: dict):
+        loop.call_soon_threadsafe(queue.put_nowait, {"type": event_type, "payload": payload})
+
+    async def runner():
+        try:
+            response = await process_graph_run(
+                langchain_messages=langchain_messages,
+                config=config,
+                current_user=current_user,
+                thread_id=thread_id,
+                include_tool_trace=include_tool_trace,
+                new_thread=new_thread,
+                event_async_emitter=async_emitter,
+                event_sync_emitter=sync_emitter,
+            )
+            await queue.put({"type": "final_answer", "payload": response})
+            await queue.put({"type": "run_completed", "payload": {"thread_id": thread_id}})
+        except RuntimeError as exc:
+            await queue.put({"type": "run_failed", "payload": {"detail": str(exc), "status": 503}})
+        except Exception as exc:
+            logger.exception("Unhandled error while processing stream request.")
+            await queue.put({"type": "run_failed", "payload": {"detail": str(exc), "status": 500}})
+        finally:
+            finished.set()
+
+    task = asyncio.create_task(runner())
+
+    async def event_generator():
+        try:
+            while True:
+                if finished.is_set() and queue.empty():
+                    break
+                event = await queue.get()
+                yield build_sse_event(event["type"], event["payload"])
+        finally:
+            task.cancel()
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @asynccontextmanager
@@ -501,31 +752,14 @@ async def chat(request: Request):
         raise HTTPException(status_code=400, detail="Invalid message format.") from exc
 
     try:
-        result = await app.state.graph.ainvoke({"messages": langchain_messages}, config=config)
-        final_message = result["messages"][-1]
-        reply = final_message.content if hasattr(final_message, "content") else str(final_message)
-        reply = remove_urls(reply)
-        tool_trace_entries = (result.get("tool_trace") or []) + build_tool_trace(result["messages"])
-
-        logger.info(
-            "Chat completed thread=%s user=%s route=%s complexity=%s tools=%s reply=%s",
-            thread_id,
-            current_user["username"],
-            (result.get("planner_decision") or {}).get("route", "agent"),
-            (result.get("planner_decision") or {}).get("complexity", "standard"),
-            [entry.get("tool") for entry in tool_trace_entries],
-            summarize_text(reply, 120),
+        response = await process_graph_run(
+            langchain_messages=langchain_messages,
+            config=config,
+            current_user=current_user,
+            thread_id=thread_id,
+            include_tool_trace=payload.include_tool_trace,
+            new_thread=new_thread,
         )
-
-        response = {
-            "reply": reply,
-            "thread_id": thread_id,
-            "planner_decision": public_planner_decision(result.get("planner_decision", {})),
-        }
-        if payload.include_tool_trace:
-            response["tool_trace"] = tool_trace_entries
-        if new_thread:
-            response["new_thread"] = True
         return JSONResponse(content=response)
     except RuntimeError as exc:
         logger.exception("Configuration error while handling request.")
@@ -533,6 +767,130 @@ async def chat(request: Request):
     except Exception as exc:
         logger.exception("Unhandled error while processing request.")
         raise HTTPException(status_code=500, detail="Internal server error.") from exc
+
+
+@app.post("/api/chat/stream")
+@limiter.limit("10 per minute")
+async def chat_stream(request: Request):
+    current_user = require_authenticated_user(request)
+    data = await parse_json_body(request)
+    payload = parse_payload_model(data, ChatRequestPayload, "Invalid chat payload.")
+    validate_chat_messages(payload.messages)
+
+    thread_id, new_thread = ensure_thread_id(payload.thread_id)
+    config = build_graph_config(thread_id, current_user, payload.local_execution)
+
+    try:
+        langchain_messages = convert_to_langchain(payload.messages)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid message format.") from exc
+
+    return await stream_graph_run(
+        langchain_messages=langchain_messages,
+        config=config,
+        current_user=current_user,
+        thread_id=thread_id,
+        include_tool_trace=payload.include_tool_trace,
+        new_thread=new_thread,
+    )
+
+
+@app.post("/api/chat/confirm")
+@limiter.limit("10 per minute")
+async def chat_confirm(request: Request):
+    current_user = require_authenticated_user(request)
+    data = await parse_json_body(request)
+    payload = parse_payload_model(data, ConfirmationPayload, "Invalid confirmation payload.")
+
+    confirmation = confirmation_store.get(payload.confirmation_id)
+    if not confirmation:
+        raise HTTPException(status_code=404, detail="Confirmation request not found.")
+    if confirmation["thread_id"] != payload.thread_id:
+        raise HTTPException(status_code=400, detail="Confirmation request thread mismatch.")
+    if confirmation["user_id"] and int(confirmation["user_id"]) != int(current_user["id"]):
+        raise HTTPException(status_code=403, detail="You cannot resolve this confirmation request.")
+
+    confirmation_store.resolve(
+        payload.confirmation_id,
+        approved=payload.approved,
+        answer=payload.response_text,
+    )
+
+    confirmation_text = "已确认继续。" if payload.approved else "已拒绝继续。"
+    if payload.response_text.strip():
+        confirmation_text += f" 用户补充：{payload.response_text.strip()}"
+
+    config = build_graph_config(payload.thread_id, current_user, payload.local_execution or confirmation["local_execution"])
+    langchain_messages = convert_to_langchain([{"role": "user", "content": confirmation_text}])
+    response = await process_graph_run(
+        langchain_messages=langchain_messages,
+        config=config,
+        current_user=current_user,
+        thread_id=payload.thread_id,
+        include_tool_trace=payload.include_tool_trace,
+        new_thread=False,
+    )
+    return JSONResponse(content=response)
+
+
+@app.post("/api/chat/confirm/stream")
+@limiter.limit("10 per minute")
+async def chat_confirm_stream(request: Request):
+    current_user = require_authenticated_user(request)
+    data = await parse_json_body(request)
+    payload = parse_payload_model(data, ConfirmationPayload, "Invalid confirmation payload.")
+
+    confirmation = confirmation_store.get(payload.confirmation_id)
+    if not confirmation:
+        raise HTTPException(status_code=404, detail="Confirmation request not found.")
+    if confirmation["thread_id"] != payload.thread_id:
+        raise HTTPException(status_code=400, detail="Confirmation request thread mismatch.")
+    if confirmation["user_id"] and int(confirmation["user_id"]) != int(current_user["id"]):
+        raise HTTPException(status_code=403, detail="You cannot resolve this confirmation request.")
+
+    confirmation_store.resolve(
+        payload.confirmation_id,
+        approved=payload.approved,
+        answer=payload.response_text,
+    )
+
+    confirmation_text = "已确认继续。" if payload.approved else "已拒绝继续。"
+    if payload.response_text.strip():
+        confirmation_text += f" 用户补充：{payload.response_text.strip()}"
+
+    config = build_graph_config(payload.thread_id, current_user, payload.local_execution or confirmation["local_execution"])
+    langchain_messages = convert_to_langchain([{"role": "user", "content": confirmation_text}])
+    return await stream_graph_run(
+        langchain_messages=langchain_messages,
+        config=config,
+        current_user=current_user,
+        thread_id=payload.thread_id,
+        include_tool_trace=payload.include_tool_trace,
+        new_thread=False,
+    )
+
+
+@app.get("/api/jobs/{job_id}")
+async def job_status(job_id: str, request: Request):
+    current_user = require_authenticated_user(request)
+    job = local_job_store.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job["user_id"] and int(job["user_id"]) != int(current_user["id"]):
+        raise HTTPException(status_code=403, detail="You cannot access this job.")
+    return job
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str, request: Request):
+    current_user = require_authenticated_user(request)
+    job = local_job_store.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job["user_id"] and int(job["user_id"]) != int(current_user["id"]):
+        raise HTTPException(status_code=403, detail="You cannot cancel this job.")
+    updated = local_job_store.cancel(job_id)
+    return {"ok": True, "job": updated}
 
 
 if __name__ == "__main__":

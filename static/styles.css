@@ -659,6 +659,94 @@
             animation-delay: 0.28s;
         }
 
+        .loading-bubble {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .loading-line {
+            margin: 0;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .loading-progress {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-height: 180px;
+            overflow: auto;
+            padding-left: 2px;
+        }
+
+        .loading-progress-item {
+            font-size: 12px;
+            color: var(--muted);
+            line-height: 1.5;
+        }
+
+        .interactive-panel {
+            margin-top: 10px;
+            padding: 12px 14px;
+            border-radius: 16px;
+            border: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.55);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        [data-theme="dark"] .interactive-panel {
+            background: rgba(20, 27, 36, 0.78);
+        }
+
+        .interactive-title {
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--primary-strong);
+        }
+
+        .interactive-copy,
+        .interactive-sub {
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        .interactive-sub {
+            color: var(--muted);
+        }
+
+        .interactive-input {
+            width: 100%;
+            min-height: 70px;
+            resize: vertical;
+            border-radius: 14px;
+            border: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.8);
+            padding: 10px 12px;
+            color: var(--text);
+        }
+
+        [data-theme="dark"] .interactive-input {
+            background: rgba(15, 23, 42, 0.72);
+        }
+
+        .interactive-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .interactive-log {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-height: 180px;
+            overflow: auto;
+        }
+
         @keyframes pulse {
             0%, 80%, 100% {
                 opacity: 0.36;

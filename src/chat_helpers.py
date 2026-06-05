@@ -76,6 +76,8 @@ def build_tool_trace(messages: list) -> list[dict]:
     for message in scoped_messages:
         if isinstance(message, ToolMessage):
             tool_name = getattr(message, "name", "") or "tool"
+            if str(message.content or "").strip().startswith("__WEI_META__:"):
+                continue
             trace.append(
                 make_trace_entry(
                     tool_name,
