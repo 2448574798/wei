@@ -19,7 +19,8 @@ local_launcher/
 
 1. 把 `launcher_config.example.json` 复制成 `launcher_config.json`
 2. 按你的实际路径修改里面的 `command`
-3. 双击根目录的 [start_local_runtime.bat](/d:/VS/wei/start_local_runtime.bat:1)
+3. 准备本地专用环境文件 `runtime_env.local`
+4. 双击 [start_local_services.bat](/d:/VS/wei/local_launcher/start_local_services.bat:1)
 
 如果某个组件暂时还没装好，可以在 `launcher_config.json` 里先设置：
 
@@ -43,6 +44,7 @@ local_launcher/dist/LocalRuntimeLauncher.exe
 
 - `LocalRuntimeLauncher.exe`
 - `launcher_config.json`
+- `runtime_env.local`
 - `bin/frpc.exe`
 - `bin/frpc.toml`
 - `bin/open-interpreter-server.exe`
@@ -51,5 +53,6 @@ local_launcher/dist/LocalRuntimeLauncher.exe
 
 - 启动器本身可以打成单个 `exe`
 - `frpc.exe` 和 `Open Interpreter` 可执行文件通常仍建议作为外部文件放在 `bin/` 目录
+- `runtime_env.local` 只给本地启动器读取，不需要让 `src/` 或仓库主应用配置感知
 - 启动器退出时会尝试一并停止这两个子进程
 - 日志会写入 `launcher_logs/`

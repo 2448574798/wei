@@ -30,6 +30,18 @@ def load_config(config_path: Path) -> dict:
     return json.loads(config_path.read_text(encoding="utf-8-sig"))
 
 
+def load_env_file(env_path: Path) -> None:
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ[str(key).strip()] = value.strip().strip('"').strip("'")
+
+
 def ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -160,11 +172,15 @@ def main() -> int:
     base_dir = app_dir()
     config_name = "launcher_config.json"
     config_path = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else base_dir / config_name
+    env_path = base_dir / "runtime_env.local"
     logs_dir = ensure_dir(base_dir / "launcher_logs")
     log_path = logs_dir / "launcher.log"
 
+    load_env_file(env_path)
     write_log(log_path, f"Launcher started from {base_dir}")
     write_log(log_path, f"Using config {config_path}")
+    if env_path.exists():
+        write_log(log_path, f"Loaded local runtime env from {env_path}")
 
     config = load_config(config_path)
     processes = validate_config(config)
