@@ -1,28 +1,47 @@
 # Local Launcher
 
-这个目录用于把 `frp` 和 `Open Interpreter` 做成一个本地一键启动器。
+这个目录用于管理本地运行组件，当前主要包含：
 
-## 目录建议
+- `frpc`
+- `Open Interpreter`
+- `Browser Bridge`
+- `Playwright + Edge` 本地网页登录入口
+
+## 目录说明
 
 ```text
 local_launcher/
-├─ bin/
-│  ├─ frpc.exe
-│  ├─ frpc.toml
-│  └─ open-interpreter-server.exe
-├─ launcher_config.json
-├─ local_launcher.py
-└─ launcher_logs/
+|-- local_launcher.py
+|-- launcher_config.json
+|-- launcher_config.example.json
+|-- start_local_services.bat
+|-- browser_bridge.py
+|-- open_douyin_edge.bat
+|-- playwright_edge_runner.py
+|-- runtime_env.local
+`-- launcher_logs/
 ```
 
-## 快速使用
+## 启动本地服务
 
-1. 把 `launcher_config.example.json` 复制成 `launcher_config.json`
-2. 按你的实际路径修改里面的 `command`
-3. 准备本地专用环境文件 `runtime_env.local`
-4. 双击 [start_local_services.bat](/d:/VS/wei/local_launcher/start_local_services.bat:1)
+双击或运行：
 
-如果某个组件暂时还没装好，可以在 `launcher_config.json` 里先设置：
+```bat
+local_launcher\start_local_services.bat
+```
+
+它会读取：
+
+- `launcher_config.json`
+- `runtime_env.local`
+
+当前会一起拉起：
+
+- `frpc`
+- `Open Interpreter`
+- `Browser Bridge`
+
+如果某个组件暂时不需要，可以在 `launcher_config.json` 里设置：
 
 ```json
 {
@@ -30,29 +49,94 @@ local_launcher/
 }
 ```
 
-## 打包成 exe
+## 打开抖音网页
 
-运行 [build_launcher.ps1](/d:/VS/wei/local_launcher/build_launcher.ps1:1)。
+双击或运行：
 
-打包后会生成：
+```bat
+local_launcher\open_douyin_edge.bat
+```
+
+它会：
+
+- 使用 Playwright 启动本机 Edge
+- 打开 `https://www.douyin.com/`
+- 复用持久化用户数据目录
+- 保持窗口打开，直到你手动关闭
+
+默认用户数据目录：
+
+```text
+D:\Download\playwright-user-data\edge-douyin-bridge
+```
+
+第一次运行后，请在打开的 Edge 窗口里手动登录，之后登录态会保存在这个目录里。
+
+## Playwright 配置
+
+`open_douyin_edge.bat` 会优先从 `runtime_env.local` 读取这些可选变量：
+
+```env
+PLAYWRIGHT_PYTHON_EXE=D:\Download\oi-env-310\Scripts\python.exe
+PLAYWRIGHT_EDGE_EXECUTABLE=C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe
+PLAYWRIGHT_EDGE_USER_DATA_DIR=D:\Download\playwright-user-data\edge-douyin-bridge
+PLAYWRIGHT_DEFAULT_URL=https://www.douyin.com/
+PLAYWRIGHT_BROWSER_WIDTH=1440
+PLAYWRIGHT_BROWSER_HEIGHT=900
+```
+
+Browser Bridge 也会使用：
+
+```env
+BROWSER_BRIDGE_HOST=127.0.0.1
+BROWSER_BRIDGE_PORT=18100
+BROWSER_BRIDGE_TOKEN=browser-bridge-local-token
+```
+
+如果没有设置：
+
+- Python 会优先尝试 `D:\Download\oi-env-310\Scripts\python.exe`
+- Edge 会自动从常见安装路径查找
+- 用户数据目录会默认使用 `D:\Download\playwright-user-data\edge-douyin-bridge`
+
+## Browser Bridge
+
+`browser_bridge.py` 是本地常驻网页自动化服务：
+
+- 默认监听 `127.0.0.1:18100`
+- 使用 `Playwright + Edge`
+- 复用持久化登录态
+- 提供最小接口：
+  - `GET /health`
+  - `POST /page/open`
+  - `POST /page/snapshot`
+  - `POST /jobs/start`
+  - `GET /jobs/{id}`
+  - `POST /jobs/{id}/cancel`
+
+如果你通过 FRP 暴露它给云端，请保证：
+
+- 本地 `BROWSER_BRIDGE_TOKEN` 已设置
+- 云端 `BROWSER_BRIDGE_URL` / `BROWSER_BRIDGE_TOKEN` 与之匹配
+
+## 打包启动器
+
+运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\local_launcher\build_launcher.ps1
+```
+
+生成：
 
 ```text
 local_launcher/dist/LocalRuntimeLauncher.exe
 ```
 
-建议把这些文件放在同一个目录分发：
+## 日志
 
-- `LocalRuntimeLauncher.exe`
-- `launcher_config.json`
-- `runtime_env.local`
-- `bin/frpc.exe`
-- `bin/frpc.toml`
-- `bin/open-interpreter-server.exe`
+本地启动器日志目录：
 
-## 说明
-
-- 启动器本身可以打成单个 `exe`
-- `frpc.exe` 和 `Open Interpreter` 可执行文件通常仍建议作为外部文件放在 `bin/` 目录
-- `runtime_env.local` 只给本地启动器读取，不需要让 `src/` 或仓库主应用配置感知
-- 启动器退出时会尝试一并停止这两个子进程
-- 日志会写入 `launcher_logs/`
+```text
+local_launcher/launcher_logs/
+```

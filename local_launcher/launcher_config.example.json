@@ -28,6 +28,22 @@
       },
       "ready_url": "http://127.0.0.1:18000",
       "ready_timeout_sec": 30
+    },
+    {
+      "name": "browser_bridge",
+      "enabled": true,
+      "kill_ports": [18100],
+      "command": [
+        "%PLAYWRIGHT_PYTHON_EXE%",
+        "{APP_DIR}\\browser_bridge.py"
+      ],
+      "cwd": "{APP_DIR}",
+      "env": {},
+      "ready_headers": {
+        "Authorization": "Bearer %BROWSER_BRIDGE_TOKEN%"
+      },
+      "ready_url": "http://127.0.0.1:18100/health",
+      "ready_timeout_sec": 30
     }
   ]
 }

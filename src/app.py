@@ -72,12 +72,16 @@ from src.runtime_config import (
 )
 from src.tools import (
     ask_open_interpreter,
+    browser_bridge_is_configured,
     decode_meta_payload,
+    inspect_local_webpage,
     online_research,
+    open_local_browser_page,
     open_interpreter_is_configured,
     request_human_confirmation,
     send_email,
     smtp_is_configured,
+    start_local_webpage_monitor,
     start_open_interpreter_job,
 )
 from src.web_helpers import (
@@ -126,7 +130,15 @@ def get_request_context(config=None) -> dict:
 def get_allowed_tools(decision: dict | None, local_execution: bool) -> list:
     route = (decision or {}).get("route", "agent")
     if local_execution:
-        return [send_email, ask_open_interpreter, start_open_interpreter_job, request_human_confirmation]
+        return [
+            send_email,
+            ask_open_interpreter,
+            start_open_interpreter_job,
+            open_local_browser_page,
+            inspect_local_webpage,
+            start_local_webpage_monitor,
+            request_human_confirmation,
+        ]
 
     complexity = (decision or {}).get("complexity", "standard")
     if route == "research":
@@ -134,7 +146,15 @@ def get_allowed_tools(decision: dict | None, local_execution: bool) -> list:
     if complexity == "simple":
         return [send_email]
     if complexity == "advanced":
-        return [send_email, ask_open_interpreter, start_open_interpreter_job, request_human_confirmation]
+        return [
+            send_email,
+            ask_open_interpreter,
+            start_open_interpreter_job,
+            open_local_browser_page,
+            inspect_local_webpage,
+            start_local_webpage_monitor,
+            request_human_confirmation,
+        ]
     return [send_email, request_human_confirmation]
 
 
@@ -362,6 +382,9 @@ async def agent_node(state: AgentState, config=None):
         "- If the dispatcher selected agent, do not try to switch back to online_research in the middle of execution.\n"
         "- If the dispatcher selected research, answer from grounded research and only do explicit post-actions such as send_email when allowed.\n"
         "- Use ask_open_interpreter only when code execution or local computer actions are actually needed.\n"
+        "- Use open_local_browser_page when the main task is simply to open a webpage locally in Edge.\n"
+        "- Use inspect_local_webpage when you need a local logged-in webpage snapshot before deciding next actions.\n"
+        "- Use start_local_webpage_monitor for longer local webpage observation tasks such as watching for specific visible text.\n"
         "- Pass runnable code directly to ask_open_interpreter, not natural-language instructions.\n"
         "- For side-effect actions such as opening apps, opening a browser, writing files, or launching programs, make the code print a short Chinese success message after the action completes.\n"
         "- Do not return raw booleans like True or False when a clearer execution message can be printed.\n"
@@ -374,6 +397,7 @@ async def agent_node(state: AgentState, config=None):
             "\n\nLocal execution policy:\n"
             "- The user is asking to operate their local computer or run local code.\n"
             "- Strongly prefer ask_open_interpreter for these tasks instead of answering abstractly.\n"
+            "- For webpage tasks on the local machine, prefer open_local_browser_page, inspect_local_webpage, or start_local_webpage_monitor before falling back to generic code execution.\n"
             "- If you call ask_open_interpreter, provide complete runnable code.\n"
             "- When opening local apps, browsers, files, or performing side effects, include a final print statement in Chinese describing what succeeded.\n"
             "- Prefer concise, reliable code over fancy code."
@@ -595,6 +619,7 @@ def build_health_payload() -> dict:
         "online_research_model": ONLINE_RESEARCH_MODEL,
         "smtp_configured": smtp_is_configured(),
         "open_interpreter_configured": open_interpreter_is_configured(),
+        "browser_bridge_configured": browser_bridge_is_configured(),
     }
 
 

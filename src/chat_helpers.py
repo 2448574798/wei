@@ -38,6 +38,9 @@ def default_tool_title(tool_name: str) -> str:
     mapping = {
         "online_research": "联网思考",
         "ask_open_interpreter": "本地解释器",
+        "open_local_browser_page": "本地浏览器",
+        "inspect_local_webpage": "本地网页快照",
+        "start_local_webpage_monitor": "本地网页观察",
         "send_email": "发送邮件",
     }
     return mapping.get(tool_name, tool_name or "工具")

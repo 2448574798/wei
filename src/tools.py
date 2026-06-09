@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import smtplib
+import time
 from contextlib import suppress
 from email.header import Header
 from email.mime.multipart import MIMEMultipart
@@ -66,6 +67,22 @@ def get_open_interpreter_auth_key() -> str:
 
 def open_interpreter_is_configured() -> bool:
     return bool(get_open_interpreter_url())
+
+
+def get_browser_bridge_url() -> str:
+    return os.getenv("BROWSER_BRIDGE_URL", "").strip().rstrip("/")
+
+
+def get_browser_bridge_token() -> str:
+    return os.getenv("BROWSER_BRIDGE_TOKEN", "").strip()
+
+
+def get_browser_bridge_timeout() -> int:
+    return int(os.getenv("BROWSER_BRIDGE_TIMEOUT", "60"))
+
+
+def browser_bridge_is_configured() -> bool:
+    return bool(get_browser_bridge_url())
 
 
 def smtp_is_configured() -> bool:
@@ -187,6 +204,71 @@ def _format_open_interpreter_result(code: str, output: str) -> str:
         return f"执行完成，动作已触发。原始返回值：{normalized}"
     return normalized
 
+
+def _browser_bridge_headers() -> dict[str, str]:
+    token = get_browser_bridge_token()
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _browser_bridge_url(path: str) -> str:
+    base_url = get_browser_bridge_url()
+    if not base_url:
+        raise RuntimeError("BROWSER_BRIDGE_URL is not configured.")
+    return base_url + path
+
+
+def _browser_bridge_get(path: str, timeout: int | None = None) -> dict:
+    response = requests.get(
+        _browser_bridge_url(path),
+        headers=_browser_bridge_headers(),
+        timeout=timeout or get_browser_bridge_timeout(),
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def _browser_bridge_post(path: str, payload: dict, timeout: int | None = None) -> dict:
+    response = requests.post(
+        _browser_bridge_url(path),
+        headers=_browser_bridge_headers(),
+        json=payload,
+        timeout=timeout or get_browser_bridge_timeout(),
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def _mirror_browser_bridge_job(local_job_id: str, remote_job_id: str) -> str:
+    seen_progress = 0
+    cancel_sent = False
+
+    while True:
+        if local_job_store.is_cancel_requested(local_job_id) and not cancel_sent:
+            cancel_sent = True
+            try:
+                _browser_bridge_post(f"/jobs/{remote_job_id}/cancel", {})
+                local_job_store.append_progress(local_job_id, "Sent a cancellation request to Browser Bridge.")
+            except Exception as exc:
+                local_job_store.append_progress(local_job_id, f"Failed to send cancellation request: {exc}")
+
+        payload = _browser_bridge_get(f"/jobs/{remote_job_id}", timeout=15)
+        progress_items = payload.get("progress", [])
+        for item in progress_items[seen_progress:]:
+            local_job_store.append_progress(local_job_id, item)
+        seen_progress = len(progress_items)
+
+        status = str(payload.get("status", "running"))
+        if status == "completed":
+            result = str(payload.get("result", "")).strip() or "Local webpage watch completed."
+            return result
+        if status in {"failed", "cancelled"}:
+            detail = str(payload.get("error") or payload.get("result") or status).strip()
+            raise RuntimeError(detail or "Browser Bridge job failed.")
+
+        time.sleep(2)
 
 def online_research(question: str) -> str:
     """Research current or changing information on the web and return a concise Chinese answer."""
@@ -396,3 +478,117 @@ def send_email(to: str, subject: str, body: str) -> str:
     except Exception as exc:
         logger.warning("Email send failed for %s: %s", to, exc)
         return f"Email send failed: {exc}"
+
+
+def open_local_browser_page(url: str) -> str:
+    """Open a webpage through the local Browser Bridge."""
+    target_url = (url or "").strip()
+    if not target_url:
+        return "Local webpage URL cannot be empty."
+    if not re.match(r"^https?://", target_url, re.IGNORECASE):
+        target_url = "https://" + target_url
+
+    try:
+        payload = _browser_bridge_post("/page/open", {"url": target_url}, timeout=20)
+    except Exception as exc:
+        logger.warning("open_local_browser_page failed: %s", exc)
+        return f"Open local webpage failed: {exc}"
+
+    current_url = str(payload.get("url") or target_url).strip()
+    title = str(payload.get("title") or "").strip()
+    if title:
+        return f"Opened local webpage: {current_url}\nPage title: {title}"
+    return f"Opened local webpage: {current_url}"
+
+
+def inspect_local_webpage(url: str, instruction: str = "") -> str:
+    """Open a webpage through Browser Bridge and return a text snapshot."""
+    target_url = (url or "").strip()
+    if not target_url:
+        return "Local webpage URL cannot be empty."
+    if not re.match(r"^https?://", target_url, re.IGNORECASE):
+        target_url = "https://" + target_url
+
+    try:
+        payload = _browser_bridge_post(
+            "/page/snapshot",
+            {
+                "url": target_url,
+                "instruction": (instruction or "").strip(),
+                "wait_ms": 3000,
+            },
+            timeout=max(30, get_browser_bridge_timeout()),
+        )
+    except Exception as exc:
+        logger.warning("inspect_local_webpage failed: %s", exc)
+        return f"Local webpage snapshot failed: {exc}"
+
+    title = str(payload.get("title") or "").strip()
+    current_url = str(payload.get("url") or target_url).strip()
+    observed = str(payload.get("instruction") or "").strip()
+    text = str(payload.get("text") or "").strip() or "[No body text extracted]"
+    parts = [f"Page title: {title or '-'}", f"Page URL: {current_url}"]
+    if observed:
+        parts.append(f"Observation target: {observed}")
+    parts.append("Page snapshot:")
+    parts.append(text)
+    return "\n".join(parts)
+
+
+def start_local_webpage_monitor(
+    url: str,
+    keyword: str,
+    title: str = "Local webpage watch",
+    rounds: int = 20,
+    interval_sec: int = 8,
+) -> str:
+    """Start a Browser Bridge watch job and mirror it into the server-side local job store."""
+    target_url = (url or "").strip()
+    watch_keyword = (keyword or "").strip()
+    if not target_url:
+        return "Local webpage URL cannot be empty."
+    if not watch_keyword:
+        return "Keyword cannot be empty."
+    if not re.match(r"^https?://", target_url, re.IGNORECASE):
+        target_url = "https://" + target_url
+
+    rounds = max(1, min(int(rounds or 20), 200))
+    interval_sec = max(2, min(int(interval_sec or 8), 300))
+
+    runtime = get_execution_context()
+    job = local_job_store.create(
+        title=title,
+        thread_id=runtime.get("thread_id", ""),
+        user_id=runtime.get("user_id"),
+        username=runtime.get("username", ""),
+    )
+    local_job_id = job["id"]
+    local_job_store.append_progress(local_job_id, f"Created local webpage watch job for keyword: {watch_keyword}")
+
+    try:
+        payload = _browser_bridge_post(
+            "/jobs/start",
+            {
+                "job_type": "watch_text",
+                "url": target_url,
+                "keyword": watch_keyword,
+                "rounds": rounds,
+                "interval_sec": interval_sec,
+                "title": title,
+            },
+            timeout=20,
+        )
+    except Exception as exc:
+        logger.warning("start_local_webpage_monitor failed: %s", exc)
+        local_job_store.fail(local_job_id, str(exc))
+        return f"Start local webpage watch failed: {exc}"
+
+    remote_job_id = str(payload.get("job_id") or "").strip()
+    if not remote_job_id:
+        local_job_store.fail(local_job_id, "Browser Bridge did not return a job id.")
+        return "Start local webpage watch failed: Browser Bridge did not return a job id."
+
+    local_job_store.append_progress(local_job_id, f"Browser Bridge job started: {remote_job_id}")
+    local_job_store.run_in_background(local_job_id, _mirror_browser_bridge_job, local_job_id, remote_job_id)
+    emit_runtime_event_sync("job_created", {"job": local_job_store.get(local_job_id)})
+    return encode_meta_payload({"kind": "job_created", "job": local_job_store.get(local_job_id)})

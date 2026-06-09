@@ -59,13 +59,14 @@ def write_log(log_path: Path, message: str) -> None:
         handle.write(line)
 
 
-def wait_for_url(url: str, timeout_sec: int, log_path: Path, name: str) -> bool:
+def wait_for_url(url: str, timeout_sec: int, log_path: Path, name: str, headers: dict[str, str] | None = None) -> bool:
     if not url:
         return True
     deadline = time.time() + max(timeout_sec, 1)
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=3) as response:
+            request = urllib.request.Request(url, headers=headers or {})
+            with urllib.request.urlopen(request, timeout=3) as response:
                 if 200 <= response.status < 500:
                     write_log(log_path, f"{name} ready: {url}")
                     return True
@@ -89,6 +90,13 @@ def build_env(extra_env: dict[str, str], base_dir: Path) -> dict[str, str]:
     for key, value in extra_env.items():
         env[str(key)] = expand_value(str(value), base_dir)
     return env
+
+
+def expand_mapping(mapping: dict[str, str], base_dir: Path) -> dict[str, str]:
+    expanded: dict[str, str] = {}
+    for key, value in mapping.items():
+        expanded[str(key)] = expand_value(str(value), base_dir)
+    return expanded
 
 
 def iter_listening_pids(port: int) -> list[int]:
@@ -216,6 +224,9 @@ def validate_config(config: dict) -> list[dict]:
         ports = item.get("kill_ports", [])
         if ports and not isinstance(ports, list):
             raise ValueError(f"Process {item.get('name', '<unknown>')} kill_ports must be a list.")
+        headers = item.get("ready_headers", {})
+        if headers and not isinstance(headers, dict):
+            raise ValueError(f"Process {item.get('name', '<unknown>')} ready_headers must be an object.")
     return processes
 
 
@@ -249,7 +260,8 @@ def main() -> int:
             ready_url = str(entry.get("ready_url", "") or "").strip()
             ready_timeout = int(entry.get("ready_timeout_sec", 0) or 0)
             if ready_url and ready_timeout > 0:
-                wait_for_url(ready_url, ready_timeout, log_path, entry["name"])
+                ready_headers = expand_mapping(entry.get("ready_headers", {}), base_dir)
+                wait_for_url(ready_url, ready_timeout, log_path, entry["name"], headers=ready_headers)
 
         write_log(log_path, "All processes started. Press Ctrl+C to stop them.")
 
