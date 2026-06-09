@@ -197,6 +197,31 @@ class BrowserBridge:
             timeout_sec=max(60, int(wait_ms / 1000) + 45),
         )
 
+    def interact(
+        self,
+        url: str = "",
+        *,
+        instruction: str = "",
+        steps: list[dict[str, Any]] | None = None,
+        wait_ms: int = 1000,
+    ) -> dict[str, Any]:
+        self._ensure_browser_started(url or "about:blank")
+        interaction_steps = steps or []
+        timeout_sec = max(60, int(wait_ms / 1000) + max(1, len(interaction_steps)) * 12)
+        return self._run_runner_command(
+            {
+                "action": "interact",
+                "cdp_url": self._cdp_base_url(),
+                "url": url,
+                "instruction": instruction,
+                "steps": interaction_steps,
+                "wait_ms": wait_ms,
+                "reuse_existing_page": True,
+                "close_page": False,
+            },
+            timeout_sec=timeout_sec,
+        )
+
     def start_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         job_type = str(payload.get("job_type") or "").strip()
         if job_type != "watch_text":
@@ -329,6 +354,16 @@ class BrowserBridgeHandler(BaseHTTPRequestHandler):
                     instruction=str(payload.get("instruction") or "").strip(),
                     wait_ms=int(payload.get("wait_ms") or 3000),
                     selector=str(payload.get("selector") or "body").strip() or "body",
+                )
+                self._send_json(HTTPStatus.OK, result)
+                return
+
+            if self.path == "/page/interact":
+                result = bridge.interact(
+                    str(payload.get("url") or "").strip(),
+                    instruction=str(payload.get("instruction") or "").strip(),
+                    steps=payload.get("steps") if isinstance(payload.get("steps"), list) else [],
+                    wait_ms=int(payload.get("wait_ms") or 1000),
                 )
                 self._send_json(HTTPStatus.OK, result)
                 return

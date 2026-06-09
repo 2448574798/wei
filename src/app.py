@@ -74,6 +74,7 @@ from src.tools import (
     ask_open_interpreter,
     browser_bridge_is_configured,
     decode_meta_payload,
+    interact_local_webpage,
     inspect_local_webpage,
     online_research,
     open_local_browser_page,
@@ -141,6 +142,7 @@ def get_allowed_tools(decision: dict | None, local_execution: bool) -> list:
             start_open_interpreter_job,
             open_local_browser_page,
             inspect_local_webpage,
+            interact_local_webpage,
             start_local_webpage_monitor,
             request_human_confirmation,
         ]
@@ -159,6 +161,7 @@ def get_allowed_tools(decision: dict | None, local_execution: bool) -> list:
             start_open_interpreter_job,
             open_local_browser_page,
             inspect_local_webpage,
+            interact_local_webpage,
             start_local_webpage_monitor,
             request_human_confirmation,
         ]
@@ -397,6 +400,8 @@ async def agent_node(state: AgentState, config=None):
         "- Use ask_open_interpreter only when code execution or local computer actions are actually needed.\n"
         "- Use open_local_browser_page when the main task is simply to open a webpage locally in Edge.\n"
         "- Use inspect_local_webpage when you need a local logged-in webpage snapshot before deciding next actions.\n"
+        "- Use interact_local_webpage for local webpage tasks that require clicks, waits, or extracting specific page text after interaction.\n"
+        "- For interact_local_webpage, pass steps_json as a JSON array. Prefer step types click_any, extract_any_text, wait, and snapshot for fragile consumer webpages.\n"
         "- Use start_local_webpage_monitor for longer local webpage observation tasks such as watching for specific visible text.\n"
         "- Pass runnable code directly to ask_open_interpreter, not natural-language instructions.\n"
         "- For side-effect actions such as opening apps, opening a browser, writing files, or launching programs, make the code print a short Chinese success message after the action completes.\n"
@@ -409,8 +414,8 @@ async def agent_node(state: AgentState, config=None):
         system_prompt += (
             "\n\nLocal execution policy:\n"
             "- The user is asking to operate their local computer or run local code.\n"
-            "- Strongly prefer ask_open_interpreter for these tasks instead of answering abstractly.\n"
-            "- For webpage tasks on the local machine, prefer open_local_browser_page, inspect_local_webpage, or start_local_webpage_monitor before falling back to generic code execution.\n"
+            "- Prefer dedicated local tools before falling back to ask_open_interpreter.\n"
+            "- For webpage tasks on the local machine, prefer open_local_browser_page, inspect_local_webpage, interact_local_webpage, or start_local_webpage_monitor before falling back to generic code execution.\n"
             "- If you call ask_open_interpreter, provide complete runnable code.\n"
             "- When opening local apps, browsers, files, or performing side effects, include a final print statement in Chinese describing what succeeded.\n"
             "- Prefer concise, reliable code over fancy code."

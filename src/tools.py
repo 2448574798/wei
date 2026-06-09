@@ -535,6 +535,80 @@ def inspect_local_webpage(url: str, instruction: str = "") -> str:
     return "\n".join(parts)
 
 
+def interact_local_webpage(url: str = "", steps_json: str = "", instruction: str = "") -> str:
+    """Interact with a local webpage through Browser Bridge using a JSON array of steps.
+
+    Supported step types include click, click_any, wait, fill, press, extract_text,
+    extract_any_text, snapshot, and goto. A step can target selector, text, role,
+    label, or placeholder. Example steps_json:
+    [
+      {"type":"click_any","targets":[{"text":"评论"},{"selector":"button:has-text('评论')"}],"wait_ms":2000},
+      {"type":"extract_any_text","name":"first_comment","targets":[{"selector":"[class*=comment-item]"}],"limit":300},
+      {"type":"snapshot","selector":"body","limit":1200}
+    ]
+    """
+    target_url = (url or "").strip()
+    if target_url and not re.match(r"^https?://", target_url, re.IGNORECASE):
+        target_url = "https://" + target_url
+
+    raw_steps = (steps_json or "").strip()
+    if not raw_steps:
+        return "steps_json cannot be empty. Pass a JSON array of interaction steps."
+
+    try:
+        steps = json.loads(raw_steps)
+    except Exception as exc:
+        return f"Invalid steps_json: {exc}"
+
+    if not isinstance(steps, list) or not steps:
+        return "steps_json must be a non-empty JSON array."
+
+    try:
+        payload = _browser_bridge_post(
+            "/page/interact",
+            {
+                "url": target_url,
+                "instruction": (instruction or "").strip(),
+                "steps": steps,
+                "wait_ms": 1000,
+            },
+            timeout=max(60, get_browser_bridge_timeout(), len(steps) * 15),
+        )
+    except Exception as exc:
+        logger.warning("interact_local_webpage failed: %s", exc)
+        return f"Local webpage interaction failed: {exc}"
+
+    title = str(payload.get("title") or "").strip()
+    current_url = str(payload.get("url") or target_url or "").strip()
+    observed = str(payload.get("instruction") or "").strip()
+    text = str(payload.get("text") or "").strip() or "[No body text extracted]"
+    extracts = payload.get("extracts") or []
+    step_results = payload.get("step_results") or []
+
+    parts = [f"Page title: {title or '-'}", f"Page URL: {current_url or '-'}"]
+    if observed:
+        parts.append(f"Observation target: {observed}")
+    if step_results:
+        parts.append("Interaction steps:")
+        for item in step_results[:12]:
+            step_type = str(item.get("type") or "step").strip()
+            status = str(item.get("status") or "ok").strip()
+            name = str(item.get("name") or "").strip()
+            detail = f"{step_type} [{status}]"
+            if name:
+                detail += f" {name}"
+            parts.append(detail)
+    if extracts:
+        parts.append("Extracted text:")
+        for item in extracts[:8]:
+            name = str(item.get("name") or "extract").strip()
+            extracted = str(item.get("text") or "").strip() or "[Empty]"
+            parts.append(f"{name}: {extracted}")
+    parts.append("Page snapshot:")
+    parts.append(text)
+    return "\n".join(parts)
+
+
 def start_local_webpage_monitor(
     url: str,
     keyword: str,
