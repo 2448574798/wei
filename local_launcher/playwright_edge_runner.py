@@ -20,6 +20,13 @@ EDGE_CANDIDATES = [
 ]
 
 
+def configure_stdio_utf8() -> None:
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def resolve_edge_executable() -> Path:
     configured = os.getenv("PLAYWRIGHT_EDGE_EXECUTABLE", "").strip()
     if configured:
@@ -155,6 +162,7 @@ def run_interactive_open(url: str, width: int, height: int) -> int:
 
 
 def main() -> int:
+    configure_stdio_utf8()
     args = parse_args()
     if args.bridge_stdio:
         return run_bridge_stdio()

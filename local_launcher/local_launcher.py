@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
 from typing import Iterable
 
 
@@ -227,7 +228,56 @@ def validate_config(config: dict) -> list[dict]:
         headers = item.get("ready_headers", {})
         if headers and not isinstance(headers, dict):
             raise ValueError(f"Process {item.get('name', '<unknown>')} ready_headers must be an object.")
+        allow_missing = item.get("allow_missing", False)
+        if not isinstance(allow_missing, bool):
+            raise ValueError(f"Process {item.get('name', '<unknown>')} allow_missing must be a boolean.")
+        restart_on_exit = item.get("restart_on_exit", True)
+        if not isinstance(restart_on_exit, bool):
+            raise ValueError(f"Process {item.get('name', '<unknown>')} restart_on_exit must be a boolean.")
+        restart_delay_sec = item.get("restart_delay_sec", 2)
+        if not isinstance(restart_delay_sec, int) or restart_delay_sec < 0:
+            raise ValueError(f"Process {item.get('name', '<unknown>')} restart_delay_sec must be a non-negative integer.")
+        max_restart_count = item.get("max_restart_count", 0)
+        if not isinstance(max_restart_count, int) or max_restart_count < 0:
+            raise ValueError(f"Process {item.get('name', '<unknown>')} max_restart_count must be a non-negative integer.")
     return processes
+
+
+def restart_process(
+    record: dict[str, Any],
+    *,
+    base_dir: Path,
+    logs_dir: Path,
+    log_path: Path,
+) -> bool:
+    entry = record["entry"]
+    process = record["process"]
+    name = entry["name"]
+
+    close_process_handles(process)
+    delay = int(entry.get("restart_delay_sec", 2) or 0)
+    if delay > 0:
+        time.sleep(delay)
+
+    kill_ports([int(port) for port in entry.get("kill_ports", [])], log_path)
+    try:
+        new_process = spawn_process(entry, base_dir, logs_dir, log_path)
+    except FileNotFoundError as exc:
+        if entry.get("allow_missing", False):
+            write_log(log_path, f"Skip restarting missing optional process {name}: {exc}")
+            record["process"] = process
+            return False
+        raise
+
+    record["process"] = new_process
+    record["restart_count"] = int(record.get("restart_count", 0)) + 1
+
+    ready_url = str(entry.get("ready_url", "") or "").strip()
+    ready_timeout = int(entry.get("ready_timeout_sec", 0) or 0)
+    if ready_url and ready_timeout > 0:
+        ready_headers = expand_mapping(entry.get("ready_headers", {}), base_dir)
+        wait_for_url(ready_url, ready_timeout, log_path, name, headers=ready_headers)
+    return True
 
 
 def main() -> int:
@@ -246,7 +296,7 @@ def main() -> int:
 
     config = load_config(config_path)
     processes = validate_config(config)
-    started: list[tuple[dict, subprocess.Popen]] = []
+    started: list[dict[str, Any]] = []
 
     try:
         for entry in processes:
@@ -254,8 +304,14 @@ def main() -> int:
                 write_log(log_path, f"Skip disabled process: {entry.get('name', '<unknown>')}")
                 continue
             kill_ports([int(port) for port in entry.get("kill_ports", [])], log_path)
-            process = spawn_process(entry, base_dir, logs_dir, log_path)
-            started.append((entry, process))
+            try:
+                process = spawn_process(entry, base_dir, logs_dir, log_path)
+            except FileNotFoundError as exc:
+                if entry.get("allow_missing", False):
+                    write_log(log_path, f"Skip missing optional process {entry['name']}: {exc}")
+                    continue
+                raise
+            started.append({"entry": entry, "process": process, "restart_count": 0})
 
             ready_url = str(entry.get("ready_url", "") or "").strip()
             ready_timeout = int(entry.get("ready_timeout_sec", 0) or 0)
@@ -266,18 +322,38 @@ def main() -> int:
         write_log(log_path, "All processes started. Press Ctrl+C to stop them.")
 
         while True:
-            dead = [(entry, process) for entry, process in started if process.poll() is not None]
+            dead = [record for record in started if record["process"].poll() is not None]
             if dead:
-                for entry, process in dead:
+                for record in dead:
+                    entry = record["entry"]
+                    process = record["process"]
                     write_log(log_path, f"{entry['name']} exited unexpectedly with code {process.returncode}")
-                return 1
+
+                    if not entry.get("restart_on_exit", True):
+                        return 1
+
+                    max_restart_count = int(entry.get("max_restart_count", 0) or 0)
+                    restart_count = int(record.get("restart_count", 0))
+                    if max_restart_count and restart_count >= max_restart_count:
+                        write_log(
+                            log_path,
+                            f"{entry['name']} reached max_restart_count={max_restart_count}, stopping launcher.",
+                        )
+                        return 1
+
+                    restarted = restart_process(record, base_dir=base_dir, logs_dir=logs_dir, log_path=log_path)
+                    if restarted:
+                        write_log(
+                            log_path,
+                            f"Restarted {entry['name']} (restart_count={record['restart_count']}).",
+                        )
             time.sleep(1)
     except KeyboardInterrupt:
         write_log(log_path, "Received Ctrl+C, shutting down.")
         return 0
     finally:
-        for entry, process in reversed(started):
-            stop_process(entry, process, log_path)
+        for record in reversed(started):
+            stop_process(record["entry"], record["process"], log_path)
 
 
 if __name__ == "__main__":

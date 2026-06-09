@@ -11,6 +11,9 @@
       ],
       "cwd": "{APP_DIR}",
       "env": {},
+      "restart_on_exit": true,
+      "restart_delay_sec": 2,
+      "max_restart_count": 20,
       "ready_url": "",
       "ready_timeout_sec": 0
     },
@@ -26,6 +29,9 @@
         "OPEN_INTERPRETER_PORT": "18000",
         "OPEN_INTERPRETER_HOST": "127.0.0.1"
       },
+      "restart_on_exit": true,
+      "restart_delay_sec": 2,
+      "max_restart_count": 20,
       "ready_url": "http://127.0.0.1:18000",
       "ready_timeout_sec": 30
     },
@@ -39,6 +45,9 @@
       ],
       "cwd": "{APP_DIR}",
       "env": {},
+      "restart_on_exit": true,
+      "restart_delay_sec": 2,
+      "max_restart_count": 20,
       "ready_headers": {
         "Authorization": "Bearer %BROWSER_BRIDGE_TOKEN%"
       },

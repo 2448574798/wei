@@ -6,7 +6,7 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from langgraph.graph import MessagesState
 from langgraph.prebuilt import ToolNode
@@ -127,11 +127,16 @@ def get_request_context(config=None) -> dict:
     }
 
 
+def email_tool_allowed(decision: dict | None) -> bool:
+    post_actions = (decision or {}).get("post_actions") or []
+    return "send_email" in post_actions
+
+
 def get_allowed_tools(decision: dict | None, local_execution: bool) -> list:
     route = (decision or {}).get("route", "agent")
+    allow_email = email_tool_allowed(decision)
     if local_execution:
-        return [
-            send_email,
+        tools = [
             ask_open_interpreter,
             start_open_interpreter_job,
             open_local_browser_page,
@@ -139,15 +144,17 @@ def get_allowed_tools(decision: dict | None, local_execution: bool) -> list:
             start_local_webpage_monitor,
             request_human_confirmation,
         ]
+        if allow_email:
+            tools.insert(0, send_email)
+        return tools
 
     complexity = (decision or {}).get("complexity", "standard")
     if route == "research":
-        return [send_email]
+        return [send_email] if allow_email else []
     if complexity == "simple":
-        return [send_email]
+        return [send_email] if allow_email else []
     if complexity == "advanced":
-        return [
-            send_email,
+        tools = [
             ask_open_interpreter,
             start_open_interpreter_job,
             open_local_browser_page,
@@ -155,7 +162,13 @@ def get_allowed_tools(decision: dict | None, local_execution: bool) -> list:
             start_local_webpage_monitor,
             request_human_confirmation,
         ]
-    return [send_email, request_human_confirmation]
+        if allow_email:
+            tools.insert(0, send_email)
+        return tools
+    tools = [request_human_confirmation]
+    if allow_email:
+        tools.insert(0, send_email)
+    return tools
 
 
 def get_allowed_tool_names(decision: dict | None, local_execution: bool) -> list[str]:
@@ -373,7 +386,7 @@ async def agent_node(state: AgentState, config=None):
     allowed_tool_names = [tool.__name__ for tool in allowed_tools]
 
     llm = get_llm(model_name)
-    llm_with_tools = llm.bind_tools(allowed_tools)
+    llm_with_tools = llm.bind_tools(allowed_tools) if allowed_tools else llm
 
     system_prompt = build_runtime_system_prompt()
     system_prompt += (
@@ -491,26 +504,34 @@ async def tools_node(state: AgentState, config=None):
             unauthorized,
             allowed_tool_names,
         )
-        unauthorized_text = "、".join(unauthorized)
-        return {
-            "messages": [
-                AIMessage(
+        unauthorized_text = ", ".join(unauthorized)
+        unauthorized_tool_messages = []
+        for call in (getattr(last_message, "tool_calls", None) or []):
+            name = call.get("name", "")
+            if not name or name not in unauthorized:
+                continue
+            unauthorized_tool_messages.append(
+                ToolMessage(
                     content=(
-                        f"当前任务复杂度或模式下不允许调用这些工具：{unauthorized_text}。"
-                        f"当前允许的工具是：{', '.join(allowed_tool_names) or '无'}。"
-                    )
+                        f"Tool call blocked: {name}.\n"
+                        f"This run does not allow that tool. Allowed tools: {', '.join(allowed_tool_names) or 'none'}."
+                    ),
+                    tool_call_id=call.get("id", ""),
+                    name=name,
                 )
-            ],
+            )
+        return {
+            "messages": unauthorized_tool_messages,
             "tool_trace": append_tool_trace(
                 state.get("tool_trace"),
                 [
                     make_trace_entry(
                         "tool_guard",
-                        f"拦截未授权工具调用：{unauthorized_text}\n允许工具：{', '.join(allowed_tool_names) or '无'}",
-                        title="工具权限控制",
+                        f"Blocked unauthorized tool calls: {unauthorized_text}\nAllowed tools: {', '.join(allowed_tool_names) or 'none'}",
+                        title="Tool Guard",
                         phase="tool_guard",
                         status="error",
-                        summary=f"已拦截未授权工具：{unauthorized_text}",
+                        summary=f"Blocked unauthorized tools: {unauthorized_text}",
                     )
                 ],
             ),

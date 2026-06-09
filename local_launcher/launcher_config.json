@@ -11,6 +11,9 @@
       ],
       "cwd": "D:\\Download\\frp_0.68.1_windows_amd64\\frp_0.68.1_windows_amd64",
       "env": {},
+      "restart_on_exit": true,
+      "restart_delay_sec": 2,
+      "max_restart_count": 20,
       "ready_url": "",
       "ready_timeout_sec": 0
     },
@@ -28,6 +31,9 @@
         "INTERPRETER_HOST": "127.0.0.1",
         "INTERPRETER_API_KEY": "dummy-api-key"
       },
+      "restart_on_exit": true,
+      "restart_delay_sec": 2,
+      "max_restart_count": 20,
       "ready_url": "http://127.0.0.1:18000/heartbeat",
       "ready_timeout_sec": 30
     },
@@ -41,6 +47,9 @@
       ],
       "cwd": "D:\\VS\\wei\\local_launcher",
       "env": {},
+      "restart_on_exit": true,
+      "restart_delay_sec": 2,
+      "max_restart_count": 20,
       "ready_headers": {
         "Authorization": "Bearer %BROWSER_BRIDGE_TOKEN%"
       },
