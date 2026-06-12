@@ -13,4 +13,13 @@ fi
 
 mkdir -p "${WEI_LOG_DIR:-./logs}"
 
-exec gunicorn src.app:app -c deploy/gunicorn.conf.py
+GUNICORN_BIN="${PROJECT_DIR}/venv/bin/gunicorn"
+if [[ ! -x "$GUNICORN_BIN" ]]; then
+  GUNICORN_BIN="${PROJECT_DIR}/.venv/bin/gunicorn"
+fi
+if [[ ! -x "$GUNICORN_BIN" ]]; then
+  echo "gunicorn executable not found in ${PROJECT_DIR}/venv or ${PROJECT_DIR}/.venv" >&2
+  exit 127
+fi
+
+exec "$GUNICORN_BIN" src.app:app -c deploy/gunicorn.conf.py
