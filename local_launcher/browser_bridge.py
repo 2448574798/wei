@@ -825,6 +825,29 @@ class BrowserBridge:
         if result.get("is_error"):
             raise RuntimeError(str(result.get("text") or "Playwright MCP browser_wait_for failed.").strip())
 
+    def _playwright_mcp_click(self, selector: str) -> tuple[bool, str]:
+        click_result = self.playwright_mcp.call_tool("browser_click", {"target": selector})
+        if not click_result.get("is_error"):
+            return True, ""
+
+        last_error = str(click_result.get("text") or "Playwright MCP browser_click failed.").strip()
+        js = (
+            "(element) => { "
+            "if (!element) return { ok: false, reason: 'not_found' }; "
+            "const clickable = element.closest('a,button,[role=\"button\"],[href],[data-e2e]') || element; "
+            "clickable.scrollIntoView({ block: 'center', inline: 'center' }); "
+            "clickable.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window })); "
+            "if (typeof clickable.click === 'function') clickable.click(); "
+            "return { ok: true }; }"
+        )
+        fallback_result = self.playwright_mcp.call_tool("browser_evaluate", {"target": selector, "function": js})
+        if fallback_result.get("is_error"):
+            return False, last_error
+        parsed = _parse_browser_evaluate_result(str(fallback_result.get("text_raw") or fallback_result.get("text") or ""))
+        if isinstance(parsed, dict) and parsed.get("ok") is True:
+            return True, ""
+        return False, last_error
+
     def _playwright_mcp_extract_text(self, selector: str, *, limit: int) -> str:
         result = self.playwright_mcp.call_tool(
             "browser_evaluate",
@@ -991,12 +1014,12 @@ class BrowserBridge:
                 if not candidates:
                     raise ValueError(f"Step {index} click requires a supported selector, text, role, label, or placeholder target.")
                 selector = str(candidates[0]["selector"])
-                click_result = self.playwright_mcp.call_tool("browser_click", {"target": selector})
-                if click_result.get("is_error"):
+                click_ok, click_error = self._playwright_mcp_click(selector)
+                if not click_ok:
                     if bool(step.get("optional")):
                         step_results.append({"index": index, "type": step_type, "status": "skipped", "target": selector})
                         continue
-                    raise RuntimeError(str(click_result.get("text") or "Playwright MCP browser_click failed.").strip())
+                    raise RuntimeError(click_error or "Playwright MCP browser_click failed.")
                 if wait_after <= 0:
                     wait_after = min(timeout_ms, 1500)
                 if wait_after > 0:
@@ -1012,13 +1035,13 @@ class BrowserBridge:
                 matched_target = ""
                 for candidate in candidates:
                     selector = str(candidate["selector"])
-                    click_result = self.playwright_mcp.call_tool("browser_click", {"target": selector})
-                    if click_result.get("is_error"):
-                        last_error = str(click_result.get("text") or "Playwright MCP browser_click failed.").strip()
+                    click_ok, click_error = self._playwright_mcp_click(selector)
+                    if not click_ok:
+                        last_error = click_error or "Playwright MCP browser_click failed."
                         continue
-                        matched_target = selector
-                        last_error = ""
-                        break
+                    matched_target = selector
+                    last_error = ""
+                    break
                 if last_error:
                     if bool(step.get("optional")):
                         step_results.append({"index": index, "type": step_type, "status": "skipped"})

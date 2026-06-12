@@ -34,6 +34,12 @@ if not exist "%RUNTIME_ENV%" (
   exit /b 1
 )
 
+powershell -NoProfile -Command "$found = Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*local_launcher.py*' }; if ($found) { $found | ForEach-Object { Write-Output ('Local launcher already running: pid=' + $_.ProcessId) }; exit 2 }"
+if "%ERRORLEVEL%"=="2" (
+  echo Reusing the existing local launcher. Stop the running launcher first if you want a full restart.
+  exit /b 0
+)
+
 for /f "usebackq eol=# tokens=1* delims==" %%A in ("%RUNTIME_ENV%") do (
   if not "%%~A"=="" set "%%~A=%%~B"
 )

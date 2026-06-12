@@ -19,6 +19,7 @@ let chatHistory = [];
 let isSending = false;
 let localExecutionMode = false;
 let currentUser = null;
+let appHealth = null;
 
 function setViewportHeight() {
     document.documentElement.style.setProperty("--vh", `${window.innerHeight * 0.01}px`);
@@ -98,6 +99,15 @@ async function ensureAuthenticated() {
     if (currentUser?.display_name) {
         setStatus(`已登录：${currentUser.display_name}`);
     }
+}
+
+async function refreshHealth() {
+    const response = await fetch("/health", { credentials: "same-origin" });
+    if (!response.ok) {
+        throw new Error(`健康检查失败：HTTP ${response.status}`);
+    }
+    appHealth = await response.json();
+    return appHealth;
 }
 
 function updateLocalExecButton() {
@@ -751,6 +761,11 @@ async function sendMessage() {
     const stopLoadingStages = startLoadingStageRotation(loadingEl);
 
     try {
+        const health = await refreshHealth();
+        if (!health.one_api_token_configured) {
+            throw new Error("服务端未配置 ONE_API_TOKEN，请先更新 .env 并重启服务。");
+        }
+
         const payload = {
             messages: [{ role: "user", content: userMessage }],
             include_tool_trace: true,
