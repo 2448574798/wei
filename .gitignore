@@ -23,7 +23,9 @@ uvicorn_local*.log
 # local runtime data
 searxng-data/
 .playwright-mcp/
+data/
 local_launcher/.env
+local_launcher/runtime_env.local
 
 # editor / os
 .vscode/

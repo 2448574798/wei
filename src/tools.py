@@ -70,7 +70,14 @@ def open_interpreter_is_configured() -> bool:
 
 
 def get_browser_bridge_url() -> str:
-    return os.getenv("BROWSER_BRIDGE_URL", "").strip().rstrip("/")
+    url = os.getenv("BROWSER_BRIDGE_URL", "").strip().rstrip("/")
+    if url:
+        return url
+    host = os.getenv("BROWSER_BRIDGE_HOST", "").strip()
+    port = os.getenv("BROWSER_BRIDGE_PORT", "").strip()
+    if host and port:
+        return f"http://{host}:{port}"
+    return ""
 
 
 def get_browser_bridge_token() -> str:

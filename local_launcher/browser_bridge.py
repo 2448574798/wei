@@ -1141,7 +1141,7 @@ class BrowserBridge:
         }
 
     def open_page(self, url: str, wait_ms: int = 3000, page_index: int | None = None) -> dict[str, Any]:
-        started_fresh = self._ensure_browser_started(url or "about:blank")
+        self._ensure_browser_started(url or "about:blank")
         return self._run_runner_command(
             {
                 "action": "open",
@@ -1149,7 +1149,7 @@ class BrowserBridge:
                 "url": url,
                 "wait_ms": wait_ms,
                 "page_index": page_index,
-                "reuse_existing_page": started_fresh,
+                "reuse_existing_page": True,
                 "close_page": False,
             },
             timeout_sec=60,
@@ -1173,7 +1173,7 @@ class BrowserBridge:
                 "wait_ms": wait_ms,
                 "selector": selector,
                 "page_index": page_index,
-                "reuse_existing_page": False,
+                "reuse_existing_page": True,
                 "close_page": True,
             },
             timeout_sec=max(60, int(wait_ms / 1000) + 45),

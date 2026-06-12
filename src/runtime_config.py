@@ -67,6 +67,7 @@ def load_system_prompt() -> str:
 
 
 load_dotenv(BASE_DIR / ".env")
+load_dotenv(BASE_DIR / "local_launcher" / ".env")
 logger = configure_logger()
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")

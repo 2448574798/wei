@@ -1,12 +1,13 @@
 import asyncio
 import json
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from langgraph.graph import MessagesState
 from langgraph.prebuilt import ToolNode
@@ -675,6 +676,7 @@ def build_health_payload() -> dict:
         "smtp_configured": smtp_is_configured(),
         "open_interpreter_configured": open_interpreter_is_configured(),
         "browser_bridge_configured": browser_bridge_is_configured(),
+        "checkpointer_backend": getattr(app.state, "checkpointer_backend", "unknown"),
     }
 
 
@@ -742,7 +744,19 @@ async def stream_graph_run(
 async def lifespan(app: FastAPI):
     init_auth_db()
     ensure_seed_admin()
-    async with AsyncRedisSaver.from_conn_string(REDIS_URL) as checkpointer:
+    async with AsyncExitStack() as stack:
+        checkpointer_backend = "memory"
+        try:
+            checkpointer = await stack.enter_async_context(AsyncRedisSaver.from_conn_string(REDIS_URL))
+            checkpointer_backend = "redis"
+        except Exception as exc:
+            logger.warning(
+                "Redis checkpoint store is unavailable for %s; falling back to in-memory checkpoints.",
+                REDIS_URL,
+                exc_info=exc,
+            )
+            checkpointer = InMemorySaver()
+        app.state.checkpointer_backend = checkpointer_backend
         app.state.graph = build_agent_graph(checkpointer)
         yield
 
