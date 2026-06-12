@@ -515,6 +515,61 @@ function pollLocalJob(jobId, onUpdate, shouldContinue = () => true) {
     };
 }
 
+function getJobResultPayload(job) {
+    if (job?.result_payload && typeof job.result_payload === "object") {
+        return job.result_payload;
+    }
+    const raw = String(job?.result || "").trim();
+    if (!raw || !raw.startsWith("{")) return null;
+    try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+function buildJobBackendLabel(payload) {
+    if (!payload) return "";
+    const backend = String(payload.backend || "").trim();
+    const fallbackFrom = String(payload.fallback_from || "").trim();
+    if (!backend) return "";
+    return fallbackFrom ? `${backend} (fallback from ${fallbackFrom})` : backend;
+}
+
+function buildJobResultHtml(job) {
+    const payload = getJobResultPayload(job);
+    const blocks = [];
+    if (payload) {
+        const backendLabel = buildJobBackendLabel(payload);
+        if (backendLabel) {
+            blocks.push(`<div class="job-detail-row"><span class="job-detail-label">Backend</span><span>${escapeHtml(backendLabel)}</span></div>`);
+        }
+        if (payload.fallback_reason) {
+            blocks.push(`<div class="job-detail-row"><span class="job-detail-label">Fallback</span><span>${escapeHtml(payload.fallback_reason)}</span></div>`);
+        }
+        if (payload.matched_keyword) {
+            blocks.push(`<div class="job-detail-row"><span class="job-detail-label">Keyword</span><span>${escapeHtml(payload.matched_keyword)}</span></div>`);
+        }
+        const extracts = Array.isArray(payload.extracts) ? payload.extracts : [];
+        extracts.slice(0, 4).forEach((item) => {
+            const name = String(item?.name || "extract").trim() || "extract";
+            const text = String(item?.text || "").trim();
+            if (!text) return;
+            blocks.push(`<div class="job-detail-block"><div class="job-detail-label">${escapeHtml(name)}</div><div class="job-detail-text">${escapeHtml(text)}</div></div>`);
+        });
+        if (payload.text) {
+            blocks.push(`<div class="job-detail-block"><div class="job-detail-label">Snapshot</div><div class="job-detail-text">${escapeHtml(String(payload.text).slice(0, 800))}</div></div>`);
+        }
+    } else if (job?.result) {
+        blocks.push(`<div class="job-detail-block"><div class="job-detail-label">Result</div><div class="job-detail-text">${escapeHtml(job.result)}</div></div>`);
+    }
+    if (job?.error) {
+        blocks.push(`<div class="job-detail-block job-detail-error"><div class="job-detail-label">Error</div><div class="job-detail-text">${escapeHtml(job.error)}</div></div>`);
+    }
+    return blocks.join("");
+}
+
 function appendInteractivePanel(wrapper, meta) {
     if (!wrapper || !meta) return;
 
@@ -549,6 +604,7 @@ function appendInteractivePanel(wrapper, meta) {
             <div class="interactive-copy">${escapeHtml(meta.pendingJob.title || "")}</div>
             <div class="interactive-sub">任务编号：${escapeHtml(meta.pendingJob.id || "")}</div>
             <div class="interactive-sub job-status">状态：${escapeHtml(meta.pendingJob.status || "running")}</div>
+            <div class="job-result"></div>
             <div class="interactive-log"></div>
             <div class="interactive-actions">
                 <button class="toolbar-btn subtle" type="button" data-action="cancel-job">请求取消</button>
@@ -556,6 +612,7 @@ function appendInteractivePanel(wrapper, meta) {
         `;
         wrapper.appendChild(panel);
         const statusEl = panel.querySelector(".job-status");
+        const resultEl = panel.querySelector(".job-result");
         const logEl = panel.querySelector(".interactive-log");
         panel.querySelector('[data-action="cancel-job"]').addEventListener("click", async () => {
             await fetch(`/api/jobs/${encodeURIComponent(meta.pendingJob.id)}/cancel`, {
@@ -564,18 +621,13 @@ function appendInteractivePanel(wrapper, meta) {
             });
             statusEl.textContent = "状态：已请求取消";
         });
-        const stopPolling = pollLocalJob(meta.pendingJob.id, (job) => {
+        pollLocalJob(meta.pendingJob.id, (job) => {
             statusEl.textContent = `状态：${job.status}`;
             logEl.innerHTML = (job.progress || [])
                 .slice(-8)
                 .map((line) => `<div class="loading-progress-item">${escapeHtml(line)}</div>`)
                 .join("");
-            if (job.result) {
-                logEl.innerHTML += `<div class="loading-progress-item">${escapeHtml(job.result)}</div>`;
-            }
-            if (job.error) {
-                logEl.innerHTML += `<div class="loading-progress-item">${escapeHtml(job.error)}</div>`;
-            }
+            resultEl.innerHTML = buildJobResultHtml(job);
         }, () => panel.isConnected);
     }
 }

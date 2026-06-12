@@ -284,11 +284,12 @@ def main() -> int:
     base_dir = app_dir()
     config_name = "launcher_config.json"
     config_path = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else base_dir / config_name
-    env_path = base_dir / "runtime_env.local"
+    env_path = base_dir / ".env"
     logs_dir = ensure_dir(base_dir / "launcher_logs")
     log_path = logs_dir / "launcher.log"
 
-    load_env_file(env_path)
+    if env_path.exists():
+        load_env_file(env_path)
     write_log(log_path, f"Launcher started from {base_dir}")
     write_log(log_path, f"Using config {config_path}")
     if env_path.exists():

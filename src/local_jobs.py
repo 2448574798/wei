@@ -67,12 +67,6 @@ class LocalJobStore:
     def _progress_key(self, job_id: str) -> str:
         return f"wei:job:{job_id}:progress"
 
-    def _touch_ttl(self, job_id: str) -> None:
-        with self._redis.pipeline() as pipe:
-            pipe.expire(self._meta_key(job_id), JOB_TTL_SECONDS)
-            pipe.expire(self._progress_key(job_id), JOB_TTL_SECONDS)
-            pipe.execute()
-
     def create(self, *, title: str, thread_id: str, user_id: int | None, username: str) -> dict:
         job = LocalJob(
             id=str(uuid4()),

@@ -747,6 +747,55 @@
             overflow: auto;
         }
 
+        .job-result {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .job-detail-row,
+        .job-detail-block {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.52);
+            padding: 8px 10px;
+        }
+
+        [data-theme="dark"] .job-detail-row,
+        [data-theme="dark"] .job-detail-block {
+            background: rgba(15, 23, 42, 0.5);
+        }
+
+        .job-detail-row {
+            display: flex;
+            gap: 8px;
+            justify-content: space-between;
+            align-items: baseline;
+            flex-wrap: wrap;
+            font-size: 12.5px;
+        }
+
+        .job-detail-label {
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+            color: var(--primary-strong);
+        }
+
+        .job-detail-text {
+            margin-top: 4px;
+            font-size: 12.5px;
+            line-height: 1.6;
+            color: var(--text);
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .job-detail-error {
+            border-color: rgba(220, 38, 38, 0.24);
+        }
+
         @keyframes pulse {
             0%, 80%, 100% {
                 opacity: 0.36;

@@ -226,7 +226,13 @@ def _browser_bridge_get(path: str, timeout: int | None = None) -> dict:
         headers=_browser_bridge_headers(),
         timeout=timeout or get_browser_bridge_timeout(),
     )
-    response.raise_for_status()
+    if not response.ok:
+        detail = ""
+        with suppress(Exception):
+            payload = response.json()
+            detail = str(payload.get("detail") or "").strip()
+        message = detail or response.text.strip() or response.reason or f"HTTP {response.status_code}"
+        raise RuntimeError(f"Browser Bridge GET {path} failed: {message}")
     return response.json()
 
 
@@ -237,7 +243,13 @@ def _browser_bridge_post(path: str, payload: dict, timeout: int | None = None) -
         json=payload,
         timeout=timeout or get_browser_bridge_timeout(),
     )
-    response.raise_for_status()
+    if not response.ok:
+        detail = ""
+        with suppress(Exception):
+            data = response.json()
+            detail = str(data.get("detail") or "").strip()
+        message = detail or response.text.strip() or response.reason or f"HTTP {response.status_code}"
+        raise RuntimeError(f"Browser Bridge POST {path} failed: {message}")
     return response.json()
 
 
@@ -489,16 +501,63 @@ def open_local_browser_page(url: str) -> str:
         target_url = "https://" + target_url
 
     try:
-        payload = _browser_bridge_post("/page/open", {"url": target_url}, timeout=20)
+        payload = _browser_bridge_post("/mcp/navigate", {"url": target_url}, timeout=30)
     except Exception as exc:
-        logger.warning("open_local_browser_page failed: %s", exc)
-        return f"Open local webpage failed: {exc}"
+        logger.info("open_local_browser_page MCP navigate failed, falling back to legacy browser bridge: %s", exc)
+        try:
+            payload = _browser_bridge_post("/page/open", {"url": target_url}, timeout=20)
+        except Exception as fallback_exc:
+            logger.warning("open_local_browser_page failed: %s", fallback_exc)
+            return f"Open local webpage failed: {fallback_exc}"
 
     current_url = str(payload.get("url") or target_url).strip()
     title = str(payload.get("title") or "").strip()
+    if not title:
+        tabs = payload.get("tabs") if isinstance(payload.get("tabs"), dict) else {}
+        structured = tabs.get("structured_content") if isinstance(tabs.get("structured_content"), dict) else {}
+        current_index = structured.get("currentTab") if isinstance(structured.get("currentTab"), int) else None
+        for item in structured.get("tabs") or []:
+            if isinstance(item, dict) and item.get("index") == current_index:
+                title = str(item.get("title") or "").strip()
+                if not current_url or current_url == target_url:
+                    current_url = str(item.get("url") or current_url or target_url).strip()
+                break
+    if not title:
+        tabs = payload.get("tabs") if isinstance(payload.get("tabs"), dict) else {}
+        tab_text = str(tabs.get("text") or "").strip()
+        if tab_text:
+            title = tab_text.splitlines()[0][:160]
     if title:
         return f"Opened local webpage: {current_url}\nPage title: {title}"
     return f"Opened local webpage: {current_url}"
+
+
+def list_local_browser_tabs() -> str:
+    """List local browser tabs through Playwright MCP via Browser Bridge."""
+    try:
+        payload = _browser_bridge_get("/mcp/tabs", timeout=20)
+    except Exception as exc:
+        logger.warning("list_local_browser_tabs failed: %s", exc)
+        return f"List local browser tabs failed: {exc}"
+
+    structured = payload.get("structured_content") if isinstance(payload.get("structured_content"), dict) else {}
+    tabs = structured.get("tabs") if isinstance(structured.get("tabs"), list) else []
+    current = structured.get("currentTab") if isinstance(structured.get("currentTab"), int) else None
+    if tabs:
+        lines = ["Local browser tabs:"]
+        for index, item in enumerate(tabs[:20]):
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "-").strip() or "-"
+            tab_url = str(item.get("url") or "-").strip() or "-"
+            prefix = "*" if current is not None and index == current else "-"
+            lines.append(f"{prefix} [{index}] {title} | {tab_url}")
+        return "\n".join(lines)
+
+    text = str(payload.get("text") or "").strip()
+    if text:
+        return f"Local browser tabs:\n{text}"
+    return "Local browser tabs: [No tabs returned]"
 
 
 def inspect_local_webpage(url: str, instruction: str = "") -> str:
@@ -511,7 +570,7 @@ def inspect_local_webpage(url: str, instruction: str = "") -> str:
 
     try:
         payload = _browser_bridge_post(
-            "/page/snapshot",
+            "/mcp/snapshot",
             {
                 "url": target_url,
                 "instruction": (instruction or "").strip(),
@@ -520,8 +579,20 @@ def inspect_local_webpage(url: str, instruction: str = "") -> str:
             timeout=max(30, get_browser_bridge_timeout()),
         )
     except Exception as exc:
-        logger.warning("inspect_local_webpage failed: %s", exc)
-        return f"Local webpage snapshot failed: {exc}"
+        logger.info("inspect_local_webpage MCP snapshot failed, falling back to legacy browser bridge: %s", exc)
+        try:
+            payload = _browser_bridge_post(
+                "/page/snapshot",
+                {
+                    "url": target_url,
+                    "instruction": (instruction or "").strip(),
+                    "wait_ms": 3000,
+                },
+                timeout=max(30, get_browser_bridge_timeout()),
+            )
+        except Exception as fallback_exc:
+            logger.warning("inspect_local_webpage failed: %s", fallback_exc)
+            return f"Local webpage snapshot failed: {fallback_exc}"
 
     title = str(payload.get("title") or "").strip()
     current_url = str(payload.get("url") or target_url).strip()
@@ -533,6 +604,41 @@ def inspect_local_webpage(url: str, instruction: str = "") -> str:
     parts.append("Page snapshot:")
     parts.append(text)
     return "\n".join(parts)
+
+
+def _step_has_supported_target(step: dict) -> bool:
+    return any(str(step.get(key) or "").strip() for key in ("selector", "text", "role", "label", "placeholder"))
+
+
+def _step_has_selector_target(step: dict) -> bool:
+    if str(step.get("selector") or "").strip():
+        return True
+    targets = step.get("targets") if isinstance(step.get("targets"), list) else []
+    return any(isinstance(item, dict) and str(item.get("selector") or "").strip() for item in targets)
+
+
+def _steps_prefer_mcp_readonly(steps: list[dict]) -> bool:
+    readonly_step_types = {"wait", "goto", "click", "click_any", "press", "extract_text", "extract_any_text", "extract_list_text", "snapshot"}
+    for step in steps:
+        if not isinstance(step, dict):
+            return False
+        step_type = str(step.get("type") or "").strip().lower()
+        if step_type not in readonly_step_types:
+            return False
+        if step_type in {"click", "extract_text"} and not _step_has_supported_target(step):
+            return False
+        if step_type in {"click_any", "extract_any_text"}:
+            targets = step.get("targets") if isinstance(step.get("targets"), list) else []
+            if targets:
+                if not any(isinstance(item, dict) and _step_has_supported_target(item) for item in targets):
+                    return False
+            elif not _step_has_supported_target(step):
+                return False
+        if step_type == "press" and _step_has_supported_target(step):
+            return False
+        if step_type == "extract_list_text" and not _step_has_selector_target(step):
+            return False
+    return True
 
 
 def interact_local_webpage(url: str = "", steps_json: str = "", instruction: str = "") -> str:
@@ -563,20 +669,51 @@ def interact_local_webpage(url: str = "", steps_json: str = "", instruction: str
     if not isinstance(steps, list) or not steps:
         return "steps_json must be a non-empty JSON array."
 
+    prefer_mcp_readonly = _steps_prefer_mcp_readonly(steps)
+
     try:
-        payload = _browser_bridge_post(
-            "/page/interact",
-            {
-                "url": target_url,
-                "instruction": (instruction or "").strip(),
-                "steps": steps,
-                "wait_ms": 1000,
-            },
-            timeout=max(60, get_browser_bridge_timeout(), len(steps) * 15),
-        )
+        if prefer_mcp_readonly:
+            payload = _browser_bridge_post(
+                "/mcp/interact",
+                {
+                    "url": target_url,
+                    "instruction": (instruction or "").strip(),
+                    "steps": steps,
+                    "wait_ms": 1000,
+                },
+                timeout=max(60, get_browser_bridge_timeout(), len(steps) * 15),
+            )
+        else:
+            payload = _browser_bridge_post(
+                "/page/interact",
+                {
+                    "url": target_url,
+                    "instruction": (instruction or "").strip(),
+                    "steps": steps,
+                    "wait_ms": 1000,
+                },
+                timeout=max(60, get_browser_bridge_timeout(), len(steps) * 15),
+            )
     except Exception as exc:
-        logger.warning("interact_local_webpage failed: %s", exc)
-        return f"Local webpage interaction failed: {exc}"
+        if prefer_mcp_readonly:
+            logger.info("interact_local_webpage MCP readonly interact failed, falling back to legacy browser bridge: %s", exc)
+            try:
+                payload = _browser_bridge_post(
+                    "/page/interact",
+                    {
+                        "url": target_url,
+                        "instruction": (instruction or "").strip(),
+                        "steps": steps,
+                        "wait_ms": 1000,
+                    },
+                    timeout=max(60, get_browser_bridge_timeout(), len(steps) * 15),
+                )
+            except Exception as fallback_exc:
+                logger.warning("interact_local_webpage failed: %s", fallback_exc)
+                return f"Local webpage interaction failed: {fallback_exc}"
+        else:
+            logger.warning("interact_local_webpage failed: %s", exc)
+            return f"Local webpage interaction failed: {exc}"
 
     title = str(payload.get("title") or "").strip()
     current_url = str(payload.get("url") or target_url or "").strip()
@@ -584,10 +721,20 @@ def interact_local_webpage(url: str = "", steps_json: str = "", instruction: str
     text = str(payload.get("text") or "").strip() or "[No body text extracted]"
     extracts = payload.get("extracts") or []
     step_results = payload.get("step_results") or []
+    backend = str(payload.get("backend") or "").strip()
+    fallback_from = str(payload.get("fallback_from") or "").strip()
+    fallback_reason = str(payload.get("fallback_reason") or "").strip()
 
     parts = [f"Page title: {title or '-'}", f"Page URL: {current_url or '-'}"]
     if observed:
         parts.append(f"Observation target: {observed}")
+    if backend:
+        backend_line = f"Execution backend: {backend}"
+        if fallback_from:
+            backend_line += f" (fallback from {fallback_from})"
+        parts.append(backend_line)
+    if fallback_reason:
+        parts.append(f"Fallback reason: {fallback_reason}")
     if step_results:
         parts.append("Interaction steps:")
         for item in step_results[:12]:
@@ -607,6 +754,156 @@ def interact_local_webpage(url: str = "", steps_json: str = "", instruction: str
     parts.append("Page snapshot:")
     parts.append(text)
     return "\n".join(parts)
+
+
+def start_local_comment_hunt(
+    keyword: str,
+    url: str = "https://www.douyin.com/jingxuan",
+    title: str = "Douyin comment hunt",
+    rounds: int = 30,
+    interval_sec: int = 5,
+    steps_json: str = "",
+    advance_steps_json: str = "",
+) -> str:
+    """Start a read-only local comment hunt job on a Douyin page.
+
+    The default workflow is tuned for Douyin 精选:
+    it resets out of any prior modal, opens the first visible recommendation card,
+    opens the right-side comment panel, extracts visible comments, and then
+    advances the feed with keyboard navigation. It does not reply to comments or
+    send messages.
+    """
+    watch_keyword = (keyword or "").strip()
+    target_url = (url or "").strip()
+    if not watch_keyword:
+        return "Keyword cannot be empty."
+    if target_url and not re.match(r"^https?://", target_url, re.IGNORECASE):
+        target_url = "https://" + target_url
+
+    default_steps = [
+        {
+            "type": "press",
+            "key": "Escape",
+            "wait_ms": 300,
+        },
+        {
+            "type": "click",
+            "selector": ".waterfall-videoCardContainer.jingxuanVideoCard",
+            "timeout_ms": 8000,
+            "wait_ms": 2200,
+        },
+        {
+            "type": "click",
+            "selector": "#douyin-web-recommend-guide-mask button.semi-button",
+            "timeout_ms": 2500,
+            "wait_ms": 600,
+            "optional": True,
+        },
+        {
+            "type": "click",
+            "selector": "#dy-modal-video-container-waterFall [data-e2e='feed-comment-icon']",
+            "timeout_ms": 8000,
+            "wait_ms": 1800,
+        },
+        {
+            "type": "extract_any_text",
+            "name": "comment_header",
+            "targets": [
+                {"selector": ".comment-header-inner-container"},
+                {"selector": "[data-e2e='comment-list']"},
+            ],
+            "limit": 300,
+        },
+        {
+            "type": "extract_list_text",
+            "name": "visible_comments",
+            "targets": [
+                {"selector": "#dy-modal-video-container-waterFall [data-e2e='comment-item']"},
+            ],
+            "item_limit": 12,
+            "limit": 280,
+        },
+        {
+            "type": "snapshot",
+            "selector": "#dy-modal-video-container-waterFall",
+            "limit": 1800,
+        },
+    ]
+    default_advance_steps = [
+        {"type": "press", "key": "Escape", "wait_ms": 400},
+        {"type": "press", "key": "Escape", "wait_ms": 400},
+        {"type": "press", "key": "PageDown", "wait_ms": 1800},
+        {"type": "snapshot", "selector": "body", "limit": 400},
+    ]
+
+    steps = default_steps
+    if (steps_json or "").strip():
+        try:
+            parsed = json.loads(steps_json)
+        except Exception as exc:
+            return f"Invalid steps_json: {exc}"
+        if not isinstance(parsed, list) or not parsed:
+            return "steps_json must be a non-empty JSON array."
+        steps = parsed
+
+    advance_steps = default_advance_steps
+    if (advance_steps_json or "").strip():
+        try:
+            parsed = json.loads(advance_steps_json)
+        except Exception as exc:
+            return f"Invalid advance_steps_json: {exc}"
+        if not isinstance(parsed, list):
+            return "advance_steps_json must be a JSON array."
+        advance_steps = parsed
+
+    rounds = max(1, min(int(rounds or 30), 300))
+    interval_sec = max(1, min(int(interval_sec or 5), 120))
+
+    runtime = get_execution_context()
+    try:
+        job = local_job_store.create(
+            title=title,
+            thread_id=runtime.get("thread_id", ""),
+            user_id=runtime.get("user_id"),
+            username=runtime.get("username", ""),
+        )
+    except Exception as exc:
+        logger.warning("start_local_comment_hunt job creation failed: %s", exc)
+        return f"Start local comment hunt failed: {exc}"
+    local_job_id = job["id"]
+    local_job_store.append_progress(local_job_id, f"Created local comment hunt job for keyword: {watch_keyword}")
+
+    try:
+        payload = _browser_bridge_post(
+            "/jobs/start",
+            {
+                "job_type": "interaction_watch",
+                "url": target_url,
+                "keyword": watch_keyword,
+                "rounds": rounds,
+                "interval_sec": interval_sec,
+                "wait_ms": 1200,
+                "steps": steps,
+                "advance_steps": advance_steps,
+                "match_extract_names": ["visible_comments"],
+                "title": title,
+            },
+            timeout=20,
+        )
+    except Exception as exc:
+        logger.warning("start_local_comment_hunt failed: %s", exc)
+        local_job_store.fail(local_job_id, str(exc))
+        return f"Start local comment hunt failed: {exc}"
+
+    remote_job_id = str(payload.get("job_id") or "").strip()
+    if not remote_job_id:
+        local_job_store.fail(local_job_id, "Browser Bridge did not return a job id.")
+        return "Start local comment hunt failed: Browser Bridge did not return a job id."
+
+    local_job_store.append_progress(local_job_id, f"Browser Bridge job started: {remote_job_id}")
+    local_job_store.run_in_background(local_job_id, _mirror_browser_bridge_job, local_job_id, remote_job_id)
+    emit_runtime_event_sync("job_created", {"job": local_job_store.get(local_job_id)})
+    return encode_meta_payload({"kind": "job_created", "job": local_job_store.get(local_job_id)})
 
 
 def start_local_webpage_monitor(

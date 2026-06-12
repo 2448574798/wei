@@ -7,6 +7,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any
 
 from playwright.sync_api import sync_playwright
@@ -59,9 +60,63 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _resolve_bridge_page(context, reuse_existing_page: bool):
+def _normalize_page_url(raw_url: str) -> str:
+    value = str(raw_url or "").strip()
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    scheme = (parsed.scheme or "").lower()
+    netloc = (parsed.netloc or "").lower()
+    path = parsed.path or ""
+    if not scheme and not netloc and value.startswith("//"):
+        parsed = urlparse("https:" + value)
+        scheme = (parsed.scheme or "").lower()
+        netloc = (parsed.netloc or "").lower()
+        path = parsed.path or ""
+    return f"{scheme}://{netloc}{path}" if scheme and netloc else value
+
+
+def _score_existing_page(page, target_url: str) -> int:
+    page_url = str(getattr(page, "url", "") or "").strip()
+    if not page_url or page_url.startswith(("edge://", "about:blank")):
+        return -1
+
+    if not target_url:
+        return 10
+
+    target = urlparse(target_url)
+    page_target = urlparse(page_url)
+    target_host = (target.netloc or "").lower()
+    page_host = (page_target.netloc or "").lower()
+    if not target_host or not page_host:
+        return 5
+
+    score = 0
+    if page_host == target_host:
+        score += 50
+    if page_target.path == target.path and target.path:
+        score += 30
+    if _normalize_page_url(page_url) == _normalize_page_url(target_url):
+        score += 40
+    if page_url == target_url:
+        score += 20
+    return score
+
+
+def _resolve_bridge_page(context, reuse_existing_page: bool, target_url: str = "", page_index: int | None = None):
+    if page_index is not None and 0 <= page_index < len(context.pages):
+        return context.pages[page_index], False
+
     if reuse_existing_page and context.pages:
-        return context.pages[-1], False
+        scored_pages = [
+            (_score_existing_page(page, target_url), index, page)
+            for index, page in enumerate(context.pages)
+        ]
+        scored_pages = [item for item in scored_pages if item[0] >= 0]
+        if scored_pages:
+            scored_pages.sort(key=lambda item: (-item[0], item[1]))
+            return scored_pages[0][2], False
+        return context.pages[0], False
     return context.new_page(), True
 
 
@@ -70,7 +125,7 @@ def _compact_text(text: str, limit: int = 3000) -> str:
     return compact[:limit]
 
 
-def _resolve_locator(page, target: dict[str, Any]):
+def _build_locator(page, target: dict[str, Any]):
     selector = str(target.get("selector") or "").strip()
     text = str(target.get("text") or "").strip()
     role = str(target.get("role") or "").strip()
@@ -92,11 +147,43 @@ def _resolve_locator(page, target: dict[str, Any]):
     else:
         raise ValueError("Each interaction step must provide selector, text, role, label, or placeholder.")
 
+    return locator
+
+
+def _resolve_locator(page, target: dict[str, Any]):
+    locator = _build_locator(page, target)
     if target.get("last"):
         return locator.last
     if "nth" in target and target.get("nth") is not None:
         return locator.nth(int(target.get("nth")))
     return locator.first
+
+
+def _resolve_visible_locator(page, target: dict[str, Any], timeout: int, *, max_candidates: int = 20):
+    locator = _build_locator(page, target)
+    if target.get("last"):
+        candidate = locator.last
+        candidate.wait_for(state="visible", timeout=timeout)
+        return candidate
+    if "nth" in target and target.get("nth") is not None:
+        candidate = locator.nth(int(target.get("nth")))
+        candidate.wait_for(state="visible", timeout=timeout)
+        return candidate
+
+    try:
+        count = min(locator.count(), max_candidates)
+    except Exception:
+        count = 0
+    for item_index in range(count):
+        candidate = locator.nth(item_index)
+        try:
+            candidate.wait_for(state="visible", timeout=min(timeout, 1200))
+            return candidate
+        except Exception:
+            continue
+    fallback = locator.first
+    fallback.wait_for(state="visible", timeout=timeout)
+    return fallback
 
 
 def _expand_targets(step: dict[str, Any]) -> list[dict[str, Any]]:
@@ -157,8 +244,14 @@ def _run_interaction_steps(page, steps: list[dict[str, Any]], instruction: str) 
 
         if step_type == "click":
             locator = _resolve_locator(page, step)
-            locator.wait_for(state="visible", timeout=timeout)
-            locator.click(timeout=timeout, force=bool(step.get("force")))
+            try:
+                locator.wait_for(state="visible", timeout=timeout)
+                locator.click(timeout=timeout, force=bool(step.get("force")))
+            except Exception:
+                if step.get("optional"):
+                    step_results.append({"index": index, "type": step_type, "status": "skipped"})
+                    continue
+                raise
             if wait_after > 0:
                 page.wait_for_timeout(wait_after)
             step_results.append({"index": index, "type": step_type, "status": "ok"})
@@ -181,6 +274,9 @@ def _run_interaction_steps(page, steps: list[dict[str, Any]], instruction: str) 
                 except Exception as exc:
                     last_error = str(exc)
             if last_error:
+                if step.get("optional"):
+                    step_results.append({"index": index, "type": step_type, "status": "skipped"})
+                    continue
                 raise RuntimeError(f"Step {index} click_any failed: {last_error}")
             if wait_after > 0:
                 page.wait_for_timeout(wait_after)
@@ -212,8 +308,7 @@ def _run_interaction_steps(page, steps: list[dict[str, Any]], instruction: str) 
             continue
 
         if step_type == "extract_text":
-            locator = _resolve_locator(page, step)
-            locator.wait_for(state="visible", timeout=timeout)
+            locator = _resolve_visible_locator(page, step, timeout)
             text = _compact_text(_extract_text(locator, timeout), int(step.get("limit") or 1000))
             name = str(step.get("name") or f"extract_{index}").strip()
             extracts.append({"name": name, "text": text})
@@ -229,8 +324,7 @@ def _run_interaction_steps(page, steps: list[dict[str, Any]], instruction: str) 
             matched_target = ""
             for target in targets:
                 try:
-                    locator = _resolve_locator(page, target)
-                    locator.wait_for(state="visible", timeout=timeout)
+                    locator = _resolve_visible_locator(page, target, timeout)
                     extracted_text = _compact_text(_extract_text(locator, timeout), int(step.get("limit") or 1000))
                     matched_target = json.dumps(target, ensure_ascii=False)
                     last_error = ""
@@ -244,11 +338,93 @@ def _run_interaction_steps(page, steps: list[dict[str, Any]], instruction: str) 
             step_results.append({"index": index, "type": step_type, "status": "ok", "name": name, "target": matched_target})
             continue
 
+        if step_type == "extract_list_text":
+            targets = _expand_targets(step)
+            if not targets:
+                target_step = dict(step)
+                for key in ("selector", "text", "role", "label", "placeholder", "name", "exact"):
+                    if key in step:
+                        target_step[key] = step[key]
+                if any(target_step.get(key) for key in ("selector", "text", "role", "label", "placeholder")):
+                    targets = [target_step]
+            if not targets:
+                raise ValueError(f"Step {index} extract_list_text requires targets, selectors, texts, or roles.")
+
+            last_error = "No candidates attempted."
+            extracted_items: list[str] = []
+            matched_target = ""
+            item_limit = max(1, min(int(step.get("item_limit") or 8), 50))
+            joiner = str(step.get("joiner") or " || ").strip() or " || "
+            for target in targets:
+                try:
+                    selector = dict(target)
+                    nth = selector.pop("nth", None)
+                    last = selector.pop("last", None)
+                    locator = _build_locator(page, selector)
+                    if nth is not None:
+                        locator = locator.nth(int(nth))
+                        locator.wait_for(state="visible", timeout=timeout)
+                    elif last:
+                        locator = locator.last
+                        locator.wait_for(state="visible", timeout=timeout)
+                    else:
+                        visible_items = []
+                        count = locator.count()
+                        if count <= 0:
+                            raise RuntimeError("No matching elements.")
+                        for item_index in range(min(count, item_limit * 3, 60)):
+                            item_locator = locator.nth(item_index)
+                            try:
+                                if item_locator.is_visible():
+                                    visible_items.append(item_locator)
+                            except Exception:
+                                continue
+                        if not visible_items:
+                            raise RuntimeError("No visible elements.")
+                        for item_locator in visible_items[:item_limit]:
+                            text = _compact_text(_extract_text(item_locator, timeout), int(step.get("limit") or 400))
+                            if text:
+                                extracted_items.append(text)
+                        if not extracted_items:
+                            raise RuntimeError("Matched visible elements were empty.")
+                        matched_target = json.dumps(target, ensure_ascii=False)
+                        last_error = ""
+                        break
+                    count = locator.count()
+                    if count <= 0:
+                        raise RuntimeError("No matching elements.")
+                    for item_index in range(min(count, item_limit)):
+                        item_locator = locator.nth(item_index)
+                        text = _compact_text(_extract_text(item_locator, timeout), int(step.get("limit") or 400))
+                        if text:
+                            extracted_items.append(text)
+                    if not extracted_items:
+                        raise RuntimeError("Matched elements were empty.")
+                    matched_target = json.dumps(target, ensure_ascii=False)
+                    last_error = ""
+                    break
+                except Exception as exc:
+                    last_error = str(exc)
+            if last_error:
+                raise RuntimeError(f"Step {index} extract_list_text failed: {last_error}")
+            name = str(step.get("name") or f"extract_{index}").strip()
+            extracts.append({"name": name, "text": joiner.join(extracted_items)})
+            step_results.append(
+                {
+                    "index": index,
+                    "type": step_type,
+                    "status": "ok",
+                    "name": name,
+                    "target": matched_target,
+                    "count": len(extracted_items),
+                }
+            )
+            continue
+
         if step_type == "snapshot":
             selector = str(step.get("selector") or "body").strip() or "body"
-            locator = page.locator(selector).first
+            locator = _resolve_visible_locator(page, {"selector": selector}, timeout)
             try:
-                locator.wait_for(state="visible", timeout=timeout)
                 snapshot_text = _compact_text(_extract_text(locator, timeout), int(step.get("limit") or 3000))
             except Exception:
                 snapshot_text = _compact_text(_extract_text(page.locator("body").first, timeout), int(step.get("limit") or 3000))
@@ -281,6 +457,9 @@ def run_bridge_payload(payload: dict[str, Any]) -> dict[str, Any]:
     reuse_existing_page = bool(payload.get("reuse_existing_page"))
     close_page = bool(payload.get("close_page"))
     steps = payload.get("steps") or []
+    page_index = payload.get("page_index")
+    if page_index is not None:
+        page_index = int(page_index)
 
     if not cdp_url:
         raise ValueError("cdp_url is required.")
@@ -298,17 +477,24 @@ def run_bridge_payload(payload: dict[str, Any]) -> dict[str, Any]:
             raise RuntimeError("No browser context available via CDP.")
 
         context = contexts[0]
-        page, created_page = _resolve_bridge_page(context, reuse_existing_page)
+        page, created_page = _resolve_bridge_page(context, reuse_existing_page, target_url, page_index)
         try:
             if target_url:
                 page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
             if wait_ms > 0 and action in {"open", "snapshot", "interact"}:
                 page.wait_for_timeout(wait_ms)
 
+            resolved_page_index = -1
+            for index, existing_page in enumerate(context.pages):
+                if existing_page == page:
+                    resolved_page_index = index
+                    break
+
             result = {
                 "ok": True,
                 "title": page.title(),
                 "url": page.url,
+                "page_index": resolved_page_index,
             }
             if action == "snapshot":
                 try:
