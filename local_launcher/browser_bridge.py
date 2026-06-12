@@ -1371,7 +1371,13 @@ class BrowserBridge:
         headers = {}
         if self.worker_token:
             headers["Authorization"] = f"Bearer {self.worker_token}"
-        with websocket_connect(self.worker_ws_url, additional_headers=headers, open_timeout=15, close_timeout=5) as websocket:
+        with websocket_connect(
+            self.worker_ws_url,
+            additional_headers=headers,
+            open_timeout=15,
+            close_timeout=5,
+            proxy=None,
+        ) as websocket:
             websocket.send(
                 json.dumps(
                     {
