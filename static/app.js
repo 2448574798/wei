@@ -542,9 +542,7 @@ function getJobResultPayload(job) {
 function buildJobBackendLabel(payload) {
     if (!payload) return "";
     const backend = String(payload.backend || "").trim();
-    const fallbackFrom = String(payload.fallback_from || "").trim();
-    if (!backend) return "";
-    return fallbackFrom ? `${backend} (fallback from ${fallbackFrom})` : backend;
+    return backend || "";
 }
 
 function buildJobResultHtml(job) {
@@ -554,9 +552,6 @@ function buildJobResultHtml(job) {
         const backendLabel = buildJobBackendLabel(payload);
         if (backendLabel) {
             blocks.push(`<div class="job-detail-row"><span class="job-detail-label">Backend</span><span>${escapeHtml(backendLabel)}</span></div>`);
-        }
-        if (payload.fallback_reason) {
-            blocks.push(`<div class="job-detail-row"><span class="job-detail-label">Fallback</span><span>${escapeHtml(payload.fallback_reason)}</span></div>`);
         }
         if (payload.matched_keyword) {
             blocks.push(`<div class="job-detail-row"><span class="job-detail-label">Keyword</span><span>${escapeHtml(payload.matched_keyword)}</span></div>`);

@@ -4,11 +4,9 @@ import json
 import os
 import re
 import subprocess
-import sys
 import threading
 import time
 import urllib.error
-import urllib.request
 from collections import deque
 from dataclasses import dataclass, field
 from http import HTTPStatus
@@ -20,13 +18,8 @@ from uuid import uuid4
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 18100
-DEFAULT_DEBUG_PORT = 19222
 DEFAULT_USER_DATA_DIR = Path(r"D:\Download\playwright-user-data\edge-douyin-bridge")
 DEFAULT_MCP_PROTOCOL_VERSION = "2025-11-25"
-DEFAULT_EDGE_PATHS = [
-    Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
-    Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
-]
 
 
 @dataclass
@@ -609,55 +602,13 @@ def _steps_prefer_mcp_readonly(steps: list[dict[str, Any]] | None) -> bool:
     return True
 
 
-def _required_extract_step_names(steps: list[dict[str, Any]] | None, *, step_types: set[str] | None = None) -> list[str]:
-    names: list[str] = []
-    for index, step in enumerate(steps or [], start=1):
-        if not isinstance(step, dict):
-            continue
-        step_type = str(step.get("type") or "").strip().lower()
-        if step_types and step_type not in step_types:
-            continue
-        if step_type not in {"extract_text", "extract_any_text", "extract_list_text"}:
-            continue
-        if bool(step.get("optional")):
-            continue
-        name = str(step.get("name") or f"extract_{index}").strip()
-        if name:
-            names.append(name)
-    return names
-
-
-def _result_has_extract_text(result: dict[str, Any], extract_name: str) -> bool:
-    for item in result.get("extracts") or []:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("name") or "").strip() != extract_name:
-            continue
-        if str(item.get("text") or "").strip():
-            return True
-    return False
-
-
-def _should_retry_legacy_for_extracts(result: dict[str, Any], steps: list[dict[str, Any]] | None) -> bool:
-    list_extract_names = _required_extract_step_names(steps, step_types={"extract_list_text"})
-    if list_extract_names and not any(_result_has_extract_text(result, name) for name in list_extract_names):
-        return True
-    return False
-
-
 def _with_backend_metadata(
     result: dict[str, Any],
     *,
     backend: str,
-    fallback_from: str = "",
-    fallback_reason: str = "",
 ) -> dict[str, Any]:
     enriched = dict(result)
     enriched["backend"] = backend
-    if fallback_from:
-        enriched["fallback_from"] = fallback_from
-    if fallback_reason:
-        enriched["fallback_reason"] = fallback_reason
     return enriched
 
 
@@ -666,117 +617,20 @@ class BrowserBridge:
         self.host = os.getenv("BROWSER_BRIDGE_HOST", DEFAULT_HOST).strip() or DEFAULT_HOST
         self.port = int(os.getenv("BROWSER_BRIDGE_PORT", str(DEFAULT_PORT)))
         self.token = os.getenv("BROWSER_BRIDGE_TOKEN", "").strip()
-        self.edge_executable = self._resolve_edge_executable()
         self.user_data_dir = self._resolve_user_data_dir()
-        self.python_executable = self._resolve_python_executable()
-        self.debug_port = int(os.getenv("PLAYWRIGHT_EDGE_DEBUG_PORT", str(DEFAULT_DEBUG_PORT)))
-        self.runner_script = Path(__file__).with_name("playwright_edge_runner.py")
         self.playwright_mcp = PlaywrightMcpClient(user_data_dir=self.user_data_dir)
 
-        self._browser_lock = threading.Lock()
         self._jobs_lock = threading.Lock()
         self._jobs: dict[str, BrowserJob] = {}
 
-    def _resolve_edge_executable(self) -> Path:
-        configured = os.getenv("PLAYWRIGHT_EDGE_EXECUTABLE", "").strip()
-        if configured:
-            path = Path(configured)
-            if path.exists():
-                return path
-            raise FileNotFoundError(f"PLAYWRIGHT_EDGE_EXECUTABLE not found: {path}")
-
-        for candidate in DEFAULT_EDGE_PATHS:
-            if candidate.exists():
-                return candidate
-        raise FileNotFoundError("Microsoft Edge executable not found.")
-
     def _resolve_user_data_dir(self) -> Path:
-        configured = os.getenv("PLAYWRIGHT_EDGE_USER_DATA_DIR", "").strip()
+        configured = os.getenv("PLAYWRIGHT_USER_DATA_DIR", "").strip()
         return Path(configured) if configured else DEFAULT_USER_DATA_DIR
-
-    def _resolve_python_executable(self) -> Path:
-        configured = os.getenv("PLAYWRIGHT_PYTHON_EXE", "").strip()
-        if configured:
-            path = Path(configured)
-            if path.exists():
-                return path
-        return Path(sys.executable).resolve()
 
     def _append_job_progress(self, job: BrowserJob, message: str) -> None:
         text = re.sub(r"\s+", " ", (message or "").strip())
         if text:
             job.progress.append(text)
-
-    def _cdp_base_url(self) -> str:
-        return f"http://127.0.0.1:{self.debug_port}"
-
-    def _debug_json_url(self, path: str) -> str:
-        return self._cdp_base_url().rstrip("/") + path
-
-    def _debug_endpoint_ready(self) -> bool:
-        try:
-            with urllib.request.urlopen(self._debug_json_url("/json/version"), timeout=2) as response:
-                return 200 <= response.status < 300
-        except Exception:
-            return False
-
-    def _ensure_browser_started(self, initial_url: str = "about:blank") -> bool:
-        if self._debug_endpoint_ready():
-            return False
-
-        with self._browser_lock:
-            if self._debug_endpoint_ready():
-                return False
-
-            self.user_data_dir.mkdir(parents=True, exist_ok=True)
-            creationflags = 0
-            if os.name == "nt":
-                creationflags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-
-            subprocess.Popen(
-                [
-                    str(self.edge_executable),
-                    f"--remote-debugging-port={self.debug_port}",
-                    f"--user-data-dir={self.user_data_dir}",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    initial_url or "about:blank",
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=creationflags,
-            )
-
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            if self._debug_endpoint_ready():
-                return True
-            time.sleep(1)
-        raise RuntimeError("Edge remote debugging endpoint did not become ready in time.")
-
-    def _run_runner_command(self, payload: dict[str, Any], timeout_sec: int) -> dict[str, Any]:
-        env = dict(os.environ)
-        process = subprocess.run(
-            [str(self.python_executable), str(self.runner_script), "--bridge-stdio"],
-            input=json.dumps(payload, ensure_ascii=False),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_sec,
-            env=env,
-        )
-        if process.returncode != 0:
-            detail = (process.stderr or process.stdout or "").strip()
-            raise RuntimeError(detail or f"Playwright runner failed with exit code {process.returncode}.")
-
-        output = (process.stdout or "").strip()
-        if not output:
-            raise RuntimeError("Playwright runner returned no output.")
-        return json.loads(output)
-
-    def browser_ready(self) -> bool:
-        return self._debug_endpoint_ready()
 
     def playwright_mcp_status(self, *, ensure_started: bool = False, refresh_tools: bool = False) -> dict[str, Any]:
         return self.playwright_mcp.status(ensure_started=ensure_started, refresh_tools=refresh_tools)
@@ -1163,72 +1017,6 @@ class BrowserBridge:
             "tabs": tabs,
         }
 
-    def open_page(self, url: str, wait_ms: int = 3000, page_index: int | None = None) -> dict[str, Any]:
-        self._ensure_browser_started(url or "about:blank")
-        return self._run_runner_command(
-            {
-                "action": "open",
-                "cdp_url": self._cdp_base_url(),
-                "url": url,
-                "wait_ms": wait_ms,
-                "page_index": page_index,
-                "reuse_existing_page": True,
-                "close_page": False,
-            },
-            timeout_sec=60,
-        )
-
-    def snapshot(
-        self,
-        url: str,
-        instruction: str = "",
-        wait_ms: int = 3000,
-        selector: str = "body",
-        page_index: int | None = None,
-    ) -> dict[str, Any]:
-        self._ensure_browser_started("about:blank")
-        return self._run_runner_command(
-            {
-                "action": "snapshot",
-                "cdp_url": self._cdp_base_url(),
-                "url": url,
-                "instruction": instruction,
-                "wait_ms": wait_ms,
-                "selector": selector,
-                "page_index": page_index,
-                "reuse_existing_page": True,
-                "close_page": True,
-            },
-            timeout_sec=max(60, int(wait_ms / 1000) + 45),
-        )
-
-    def interact(
-        self,
-        url: str = "",
-        *,
-        instruction: str = "",
-        steps: list[dict[str, Any]] | None = None,
-        wait_ms: int = 1000,
-        page_index: int | None = None,
-    ) -> dict[str, Any]:
-        self._ensure_browser_started(url or "about:blank")
-        interaction_steps = steps or []
-        timeout_sec = max(60, int(wait_ms / 1000) + max(1, len(interaction_steps)) * 12)
-        return self._run_runner_command(
-            {
-                "action": "interact",
-                "cdp_url": self._cdp_base_url(),
-                "url": url,
-                "instruction": instruction,
-                "steps": interaction_steps,
-                "wait_ms": wait_ms,
-                "page_index": page_index,
-                "reuse_existing_page": True,
-                "close_page": False,
-            },
-            timeout_sec=timeout_sec,
-        )
-
     def interact_prefer_mcp_readonly(
         self,
         url: str = "",
@@ -1239,42 +1027,18 @@ class BrowserBridge:
         page_index: int | None = None,
     ) -> dict[str, Any]:
         interaction_steps = [item for item in (steps or []) if isinstance(item, dict)]
-        if _steps_prefer_mcp_readonly(interaction_steps):
-            fallback_reason = ""
-            try:
-                result = self.playwright_mcp_interact_readonly(
-                    url=url,
-                    instruction=instruction,
-                    steps=interaction_steps,
-                    wait_ms=wait_ms,
-                )
-                if not _should_retry_legacy_for_extracts(result, interaction_steps):
-                    return _with_backend_metadata(result, backend="playwright_mcp")
-                fallback_reason = "mcp_extracts_incomplete"
-            except Exception as exc:
-                fallback_reason = str(exc)
-            return _with_backend_metadata(
-                self.interact(
-                    url,
-                    instruction=instruction,
-                    steps=interaction_steps,
-                    wait_ms=wait_ms,
-                    page_index=page_index,
-                ),
-                backend="legacy_runner",
-                fallback_from="playwright_mcp",
-                fallback_reason=fallback_reason,
+        if not _steps_prefer_mcp_readonly(interaction_steps):
+            raise ValueError(
+                "MCP-only Browser Bridge supports readonly steps only: wait, goto, click, click_any, press, "
+                "extract_text, extract_any_text, extract_list_text, and snapshot."
             )
-        return _with_backend_metadata(
-            self.interact(
-                url,
-                instruction=instruction,
-                steps=interaction_steps,
-                wait_ms=wait_ms,
-                page_index=page_index,
-            ),
-            backend="legacy_runner",
+        result = self.playwright_mcp_interact_readonly(
+            url=url,
+            instruction=instruction,
+            steps=interaction_steps,
+            wait_ms=wait_ms,
         )
+        return _with_backend_metadata(result, backend="playwright_mcp")
 
     def start_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         job_type = str(payload.get("job_type") or "").strip()
@@ -1357,11 +1121,7 @@ class BrowserBridge:
         }
 
         def backend_label(result: dict[str, Any]) -> str:
-            backend = str(result.get("backend") or "").strip()
-            fallback_from = str(result.get("fallback_from") or "").strip()
-            if backend and fallback_from:
-                return f"{backend} (fallback from {fallback_from})"
-            return backend
+            return str(result.get("backend") or "").strip()
 
         try:
             if not keyword:
@@ -1419,8 +1179,6 @@ class BrowserBridge:
                             "url": result.get("url", ""),
                             "title": result.get("title", ""),
                             "backend": str(result.get("backend") or ""),
-                            "fallback_from": str(result.get("fallback_from") or ""),
-                            "fallback_reason": str(result.get("fallback_reason") or ""),
                             "extracts": extracts,
                             "text": snapshot_text[:3000],
                         },
@@ -1492,7 +1250,6 @@ class BrowserBridgeHandler(BaseHTTPRequestHandler):
                     HTTPStatus.OK,
                     {
                         "status": "ok",
-                        "browser_ready": bridge.browser_ready(),
                         "playwright_mcp": bridge.playwright_mcp_status(),
                         "host": bridge.host,
                         "port": bridge.port,
@@ -1529,46 +1286,6 @@ class BrowserBridgeHandler(BaseHTTPRequestHandler):
         try:
             self._authorize()
             payload = self._read_json()
-
-            if self.path == "/page/open":
-                page_index = payload.get("page_index")
-                if page_index is not None:
-                    page_index = int(page_index)
-                result = bridge.open_page(
-                    str(payload.get("url") or "").strip(),
-                    int(payload.get("wait_ms") or 3000),
-                    page_index=page_index,
-                )
-                self._send_json(HTTPStatus.OK, result)
-                return
-
-            if self.path == "/page/snapshot":
-                page_index = payload.get("page_index")
-                if page_index is not None:
-                    page_index = int(page_index)
-                result = bridge.snapshot(
-                    str(payload.get("url") or "").strip(),
-                    instruction=str(payload.get("instruction") or "").strip(),
-                    wait_ms=int(payload.get("wait_ms") or 3000),
-                    selector=str(payload.get("selector") or "body").strip() or "body",
-                    page_index=page_index,
-                )
-                self._send_json(HTTPStatus.OK, result)
-                return
-
-            if self.path == "/page/interact":
-                page_index = payload.get("page_index")
-                if page_index is not None:
-                    page_index = int(page_index)
-                result = bridge.interact(
-                    str(payload.get("url") or "").strip(),
-                    instruction=str(payload.get("instruction") or "").strip(),
-                    steps=payload.get("steps") if isinstance(payload.get("steps"), list) else [],
-                    wait_ms=int(payload.get("wait_ms") or 1000),
-                    page_index=page_index,
-                )
-                self._send_json(HTTPStatus.OK, result)
-                return
 
             if self.path == "/jobs/start":
                 result = bridge.start_job(payload)
@@ -1679,9 +1396,8 @@ class BrowserBridgeHandler(BaseHTTPRequestHandler):
 def main() -> int:
     server = ThreadingHTTPServer((bridge.host, bridge.port), BrowserBridgeHandler)
     print(f"Browser Bridge listening on http://{bridge.host}:{bridge.port}")
-    print(f"Edge executable: {bridge.edge_executable}")
     print(f"User data dir: {bridge.user_data_dir}")
-    print(f"CDP endpoint: {bridge._cdp_base_url()}")
+    print(f"Playwright MCP command: {bridge.playwright_mcp.command}")
     if bridge.token:
         print("Auth token: configured")
     else:

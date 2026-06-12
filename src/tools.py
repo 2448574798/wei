@@ -48,6 +48,13 @@ REQUEST_HEADERS = {
 FETCH_BLOCKED_STATUS_CODES = {403, 429}
 META_PREFIX = "__WEI_META__:"
 
+VERIFICATION_PAGE_MARKERS = (
+    "验证码中间页",
+    "请完成下列验证后继续",
+    "拖动完成上方拼图",
+    "按住左边按钮拖动完成上方拼图",
+)
+
 
 def get_open_interpreter_url() -> str:
     return os.getenv("OPEN_INTERPRETER_URL", "").strip().rstrip("/")
@@ -102,6 +109,16 @@ def is_fetch_error(text: str) -> bool:
 
 def get_domain(url: str) -> str:
     return urlparse(url).netloc.lower()
+
+
+def _manual_verification_message(title: str, text: str, url: str = "") -> str:
+    combined = "\n".join(part for part in (title, text, url) if part).strip()
+    if not combined:
+        return ""
+    for marker in VERIFICATION_PAGE_MARKERS:
+        if marker in combined:
+            return "Manual verification required: the current page is blocked by a captcha/verification challenge. Complete it in the local browser, then retry."
+    return ""
 
 
 def web_search(query: str) -> str:
@@ -510,12 +527,8 @@ def open_local_browser_page(url: str) -> str:
     try:
         payload = _browser_bridge_post("/mcp/navigate", {"url": target_url}, timeout=30)
     except Exception as exc:
-        logger.info("open_local_browser_page MCP navigate failed, falling back to legacy browser bridge: %s", exc)
-        try:
-            payload = _browser_bridge_post("/page/open", {"url": target_url}, timeout=20)
-        except Exception as fallback_exc:
-            logger.warning("open_local_browser_page failed: %s", fallback_exc)
-            return f"Open local webpage failed: {fallback_exc}"
+        logger.warning("open_local_browser_page failed: %s", exc)
+        return f"Open local webpage failed: {exc}"
 
     current_url = str(payload.get("url") or target_url).strip()
     title = str(payload.get("title") or "").strip()
@@ -534,6 +547,9 @@ def open_local_browser_page(url: str) -> str:
         tab_text = str(tabs.get("text") or "").strip()
         if tab_text:
             title = tab_text.splitlines()[0][:160]
+    manual_notice = _manual_verification_message(title, str(payload.get("text") or "").strip(), current_url)
+    if manual_notice:
+        return f"{manual_notice}\nPage URL: {current_url}\nPage title: {title or '-'}"
     if title:
         return f"Opened local webpage: {current_url}\nPage title: {title}"
     return f"Opened local webpage: {current_url}"
@@ -586,26 +602,17 @@ def inspect_local_webpage(url: str, instruction: str = "") -> str:
             timeout=max(30, get_browser_bridge_timeout()),
         )
     except Exception as exc:
-        logger.info("inspect_local_webpage MCP snapshot failed, falling back to legacy browser bridge: %s", exc)
-        try:
-            payload = _browser_bridge_post(
-                "/page/snapshot",
-                {
-                    "url": target_url,
-                    "instruction": (instruction or "").strip(),
-                    "wait_ms": 3000,
-                },
-                timeout=max(30, get_browser_bridge_timeout()),
-            )
-        except Exception as fallback_exc:
-            logger.warning("inspect_local_webpage failed: %s", fallback_exc)
-            return f"Local webpage snapshot failed: {fallback_exc}"
+        logger.warning("inspect_local_webpage failed: %s", exc)
+        return f"Local webpage snapshot failed: {exc}"
 
     title = str(payload.get("title") or "").strip()
     current_url = str(payload.get("url") or target_url).strip()
     observed = str(payload.get("instruction") or "").strip()
     text = str(payload.get("text") or "").strip() or "[No body text extracted]"
     parts = [f"Page title: {title or '-'}", f"Page URL: {current_url}"]
+    manual_notice = _manual_verification_message(title, text, current_url)
+    if manual_notice:
+        parts.insert(0, manual_notice)
     if observed:
         parts.append(f"Observation target: {observed}")
     parts.append("Page snapshot:")
@@ -676,51 +683,26 @@ def interact_local_webpage(url: str = "", steps_json: str = "", instruction: str
     if not isinstance(steps, list) or not steps:
         return "steps_json must be a non-empty JSON array."
 
-    prefer_mcp_readonly = _steps_prefer_mcp_readonly(steps)
+    if not _steps_prefer_mcp_readonly(steps):
+        return (
+            "Local webpage interaction failed: MCP-only Browser Bridge currently supports readonly steps only: "
+            "wait, goto, click, click_any, press, extract_text, extract_any_text, extract_list_text, and snapshot."
+        )
 
     try:
-        if prefer_mcp_readonly:
-            payload = _browser_bridge_post(
-                "/mcp/interact",
-                {
-                    "url": target_url,
-                    "instruction": (instruction or "").strip(),
-                    "steps": steps,
-                    "wait_ms": 1000,
-                },
-                timeout=max(60, get_browser_bridge_timeout(), len(steps) * 15),
-            )
-        else:
-            payload = _browser_bridge_post(
-                "/page/interact",
-                {
-                    "url": target_url,
-                    "instruction": (instruction or "").strip(),
-                    "steps": steps,
-                    "wait_ms": 1000,
-                },
-                timeout=max(60, get_browser_bridge_timeout(), len(steps) * 15),
-            )
+        payload = _browser_bridge_post(
+            "/mcp/interact",
+            {
+                "url": target_url,
+                "instruction": (instruction or "").strip(),
+                "steps": steps,
+                "wait_ms": 1000,
+            },
+            timeout=max(60, get_browser_bridge_timeout(), len(steps) * 15),
+        )
     except Exception as exc:
-        if prefer_mcp_readonly:
-            logger.info("interact_local_webpage MCP readonly interact failed, falling back to legacy browser bridge: %s", exc)
-            try:
-                payload = _browser_bridge_post(
-                    "/page/interact",
-                    {
-                        "url": target_url,
-                        "instruction": (instruction or "").strip(),
-                        "steps": steps,
-                        "wait_ms": 1000,
-                    },
-                    timeout=max(60, get_browser_bridge_timeout(), len(steps) * 15),
-                )
-            except Exception as fallback_exc:
-                logger.warning("interact_local_webpage failed: %s", fallback_exc)
-                return f"Local webpage interaction failed: {fallback_exc}"
-        else:
-            logger.warning("interact_local_webpage failed: %s", exc)
-            return f"Local webpage interaction failed: {exc}"
+        logger.warning("interact_local_webpage failed: %s", exc)
+        return f"Local webpage interaction failed: {exc}"
 
     title = str(payload.get("title") or "").strip()
     current_url = str(payload.get("url") or target_url or "").strip()
@@ -729,19 +711,15 @@ def interact_local_webpage(url: str = "", steps_json: str = "", instruction: str
     extracts = payload.get("extracts") or []
     step_results = payload.get("step_results") or []
     backend = str(payload.get("backend") or "").strip()
-    fallback_from = str(payload.get("fallback_from") or "").strip()
-    fallback_reason = str(payload.get("fallback_reason") or "").strip()
 
     parts = [f"Page title: {title or '-'}", f"Page URL: {current_url or '-'}"]
+    manual_notice = _manual_verification_message(title, text, current_url)
+    if manual_notice:
+        parts.insert(0, manual_notice)
     if observed:
         parts.append(f"Observation target: {observed}")
     if backend:
-        backend_line = f"Execution backend: {backend}"
-        if fallback_from:
-            backend_line += f" (fallback from {fallback_from})"
-        parts.append(backend_line)
-    if fallback_reason:
-        parts.append(f"Fallback reason: {fallback_reason}")
+        parts.append(f"Execution backend: {backend}")
     if step_results:
         parts.append("Interaction steps:")
         for item in step_results[:12]:

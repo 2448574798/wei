@@ -2,8 +2,6 @@
 setlocal
 
 set "SCRIPT_DIR=%~dp0"
-set "ROOT_DIR=%SCRIPT_DIR%..\\"
-set "RUNNER_SCRIPT=%SCRIPT_DIR%playwright_edge_runner.py"
 set "RUNTIME_ENV=%SCRIPT_DIR%.env"
 
 if not exist "%RUNTIME_ENV%" (
@@ -14,31 +12,34 @@ if not exist "%RUNTIME_ENV%" (
   exit /b 1
 )
 
-if exist "%RUNTIME_ENV%" (
-  for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%RUNTIME_ENV%") do (
-    if not "%%A"=="" set "%%A=%%B"
-  )
+for /f "usebackq eol=# tokens=1* delims==" %%A in ("%RUNTIME_ENV%") do (
+  if not "%%~A"=="" set "%%~A=%%~B"
 )
 
-set "PYTHON_EXE=%PLAYWRIGHT_PYTHON_EXE%"
-if not defined PYTHON_EXE if exist "D:\Download\oi-env-310\Scripts\python.exe" set "PYTHON_EXE=D:\Download\oi-env-310\Scripts\python.exe"
-if not defined PYTHON_EXE if exist "%ROOT_DIR%.venv\Scripts\python.exe" set "PYTHON_EXE=%ROOT_DIR%.venv\Scripts\python.exe"
 if not defined PLAYWRIGHT_DEFAULT_URL set "PLAYWRIGHT_DEFAULT_URL=https://www.douyin.com/"
-
-if not defined PYTHON_EXE (
-  echo Missing Python runtime for Playwright.
-  echo Set PLAYWRIGHT_PYTHON_EXE in local_launcher\.env or install:
-  echo   D:\Download\oi-env-310\Scripts\python.exe
-  pause
-  exit /b 1
+if defined BROWSER_BRIDGE_URL (
+  set "BRIDGE_URL=%BROWSER_BRIDGE_URL%"
+) else (
+  if not defined BROWSER_BRIDGE_HOST set "BROWSER_BRIDGE_HOST=127.0.0.1"
+  if not defined BROWSER_BRIDGE_PORT set "BROWSER_BRIDGE_PORT=18100"
+  set "BRIDGE_URL=http://%BROWSER_BRIDGE_HOST%:%BROWSER_BRIDGE_PORT%"
 )
 
-"%PYTHON_EXE%" "%RUNNER_SCRIPT%" --url "%PLAYWRIGHT_DEFAULT_URL%"
-set "EXIT_CODE=%ERRORLEVEL%"
+powershell -NoProfile -Command ^
+  "$headers=@{}; if ($env:BROWSER_BRIDGE_TOKEN) { $headers['Authorization']='Bearer ' + $env:BROWSER_BRIDGE_TOKEN };" ^
+  "try {" ^
+  "  $body = @{ url = $env:PLAYWRIGHT_DEFAULT_URL } | ConvertTo-Json -Compress;" ^
+  "  $response = Invoke-RestMethod -Method Post -Uri ($env:BRIDGE_URL + '/mcp/navigate') -Headers $headers -ContentType 'application/json' -Body $body;" ^
+  "  Write-Output ('Opened: ' + ($response.url));" ^
+  "  if ($response.title) { Write-Output ('Title: ' + $response.title) }" ^
+  "} catch {" ^
+  "  Write-Error ('Browser Bridge MCP navigate failed. Start local_launcher\\start_local_services.bat first. ' + $_.Exception.Message);" ^
+  "  exit 1" ^
+  "}"
 
+set "EXIT_CODE=%ERRORLEVEL%"
 if not "%EXIT_CODE%"=="0" (
   echo.
-  echo Playwright runner exited with code %EXIT_CODE%.
   pause
 )
 
