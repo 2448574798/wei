@@ -15,10 +15,11 @@ from bs4 import BeautifulSoup
 from websockets.sync.client import connect
 
 from src.execution_context import emit_runtime_event_sync, get_execution_context
+from src.browser_worker_hub import browser_worker_hub
 from src.human_loop import confirmation_store
 from src.local_jobs import local_job_store
 from src.research_client import call_online_research_model
-from src.runtime_config import ONLINE_RESEARCH_MODEL
+from src.runtime_config import BROWSER_WORKER_DEFAULT_ID, BROWSER_WORKER_ENABLED, BROWSER_WORKER_REQUEST_TIMEOUT, ONLINE_RESEARCH_MODEL
 
 
 logger = logging.getLogger("wei_agent")
@@ -97,6 +98,15 @@ def get_browser_bridge_timeout() -> int:
 
 def browser_bridge_is_configured() -> bool:
     return bool(get_browser_bridge_url())
+
+
+def get_browser_worker_id() -> str:
+    configured = os.getenv("BROWSER_WORKER_ID", "").strip()
+    return configured or BROWSER_WORKER_DEFAULT_ID
+
+
+def browser_worker_is_configured() -> bool:
+    return BROWSER_WORKER_ENABLED
 
 
 def smtp_is_configured() -> bool:
@@ -275,6 +285,152 @@ def _browser_bridge_post(path: str, payload: dict, timeout: int | None = None) -
         message = detail or response.text.strip() or response.reason or f"HTTP {response.status_code}"
         raise RuntimeError(f"Browser Bridge POST {path} failed: {message}")
     return response.json()
+
+
+def _browser_worker_request(command: str, payload: dict, timeout: int | None = None) -> dict:
+    worker_id = get_browser_worker_id()
+    if not worker_id:
+        raise RuntimeError("BROWSER_WORKER_ID is not configured.")
+    timeout_sec = timeout or BROWSER_WORKER_REQUEST_TIMEOUT
+    try:
+        return browser_worker_hub.request_sync(worker_id, command, payload, timeout_sec=timeout_sec)
+    except Exception as exc:
+        raise RuntimeError(f"Browser worker {command} failed: {exc}") from exc
+
+
+def _run_worker_watch_text_job(
+    local_job_id: str,
+    *,
+    url: str,
+    keyword: str,
+    rounds: int,
+    interval_sec: int,
+    wait_ms: int,
+) -> str:
+    lowered_keyword = keyword.lower()
+    for index in range(rounds):
+        if local_job_store.is_cancel_requested(local_job_id):
+            return "Local webpage watch cancelled."
+
+        snapshot = _browser_worker_request(
+            "browser.snapshot",
+            {
+                "url": url,
+                "instruction": keyword,
+                "wait_ms": wait_ms,
+            },
+            timeout=max(30, get_browser_bridge_timeout()),
+        )
+        title = str(snapshot.get("title") or "").strip()
+        current_url = str(snapshot.get("url") or url).strip()
+        text = str(snapshot.get("text") or "").strip()
+        excerpt = text[:240] or "[No body text extracted]"
+        local_job_store.append_progress(local_job_id, f"Round {index + 1}: {excerpt}")
+
+        manual_notice = _manual_verification_message(title, text, current_url)
+        if manual_notice:
+            raise RuntimeError(f"{manual_notice} Page URL: {current_url}")
+
+        if lowered_keyword in text.lower():
+            local_job_store.append_progress(local_job_id, f"Matched keyword: {keyword}")
+            return f"Matched keyword: {keyword}\n{text[:2000]}"
+
+        if index < rounds - 1:
+            time.sleep(interval_sec)
+
+    local_job_store.append_progress(local_job_id, f"Keyword not found: {keyword}")
+    return f"Keyword not found: {keyword}"
+
+
+def _run_worker_interaction_watch_job(
+    local_job_id: str,
+    *,
+    url: str,
+    keyword: str,
+    rounds: int,
+    interval_sec: int,
+    wait_ms: int,
+    steps: list[dict],
+    advance_steps: list[dict],
+    match_extract_names: set[str],
+) -> str:
+    lowered_keyword = keyword.lower()
+    current_url = url
+
+    for index in range(rounds):
+        if local_job_store.is_cancel_requested(local_job_id):
+            return "Local comment hunt cancelled."
+
+        result = _browser_worker_request(
+            "browser.interact",
+            {
+                "url": current_url,
+                "instruction": keyword,
+                "steps": steps,
+                "wait_ms": wait_ms,
+            },
+            timeout=max(60, get_browser_bridge_timeout(), len(steps) * 15),
+        )
+        current_url = ""
+        title = str(result.get("title") or "").strip()
+        page_url = str(result.get("url") or "").strip()
+        snapshot_text = str(result.get("text") or "").strip()
+        extracts = result.get("extracts") if isinstance(result.get("extracts"), list) else []
+
+        manual_notice = _manual_verification_message(title, snapshot_text, page_url)
+        if manual_notice:
+            raise RuntimeError(f"{manual_notice} Page URL: {page_url or '-'}")
+
+        extract_parts: list[str] = []
+        for item in extracts:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            if not match_extract_names or name in match_extract_names:
+                extract_parts.append(text)
+        searched_text = "\n".join(extract_parts or [snapshot_text]).strip()
+        preview = searched_text[:240] or snapshot_text[:240] or "[No text extracted]"
+        local_job_store.append_progress(local_job_id, f"Round {index + 1} [browser_worker]: {preview}")
+
+        if lowered_keyword in searched_text.lower():
+            local_job_store.append_progress(local_job_id, f"Matched keyword: {keyword}")
+            return json.dumps(
+                {
+                    "matched_keyword": keyword,
+                    "url": page_url,
+                    "title": title,
+                    "backend": "browser_worker",
+                    "extracts": extracts,
+                    "text": snapshot_text[:3000],
+                },
+                ensure_ascii=False,
+            )
+
+        if index < rounds - 1:
+            if advance_steps:
+                try:
+                    advance_result = _browser_worker_request(
+                        "browser.interact",
+                        {
+                            "url": "",
+                            "instruction": "advance",
+                            "steps": advance_steps,
+                            "wait_ms": 500,
+                        },
+                        timeout=max(60, get_browser_bridge_timeout(), len(advance_steps) * 15),
+                    )
+                    advance_text = str(advance_result.get("text") or "").strip()
+                    if advance_text:
+                        local_job_store.append_progress(local_job_id, f"Advance [browser_worker]: {advance_text[:160]}")
+                except Exception as exc:
+                    local_job_store.append_progress(local_job_id, f"Advance failed: {exc}")
+            time.sleep(interval_sec)
+
+    local_job_store.append_progress(local_job_id, f"Keyword not found: {keyword}")
+    return f"Keyword not found: {keyword}"
 
 
 def _mirror_browser_bridge_job(local_job_id: str, remote_job_id: str) -> str:
@@ -525,7 +681,10 @@ def open_local_browser_page(url: str) -> str:
         target_url = "https://" + target_url
 
     try:
-        payload = _browser_bridge_post("/mcp/navigate", {"url": target_url}, timeout=30)
+        if browser_worker_is_configured():
+            payload = _browser_worker_request("browser.navigate", {"url": target_url}, timeout=30)
+        else:
+            payload = _browser_bridge_post("/mcp/navigate", {"url": target_url}, timeout=30)
     except Exception as exc:
         logger.warning("open_local_browser_page failed: %s", exc)
         return f"Open local webpage failed: {exc}"
@@ -558,7 +717,10 @@ def open_local_browser_page(url: str) -> str:
 def list_local_browser_tabs() -> str:
     """List local browser tabs through Playwright MCP via Browser Bridge."""
     try:
-        payload = _browser_bridge_get("/mcp/tabs", timeout=20)
+        if browser_worker_is_configured():
+            payload = _browser_worker_request("browser.tabs", {}, timeout=20)
+        else:
+            payload = _browser_bridge_get("/mcp/tabs", timeout=20)
     except Exception as exc:
         logger.warning("list_local_browser_tabs failed: %s", exc)
         return f"List local browser tabs failed: {exc}"
@@ -592,15 +754,15 @@ def inspect_local_webpage(url: str, instruction: str = "") -> str:
         target_url = "https://" + target_url
 
     try:
-        payload = _browser_bridge_post(
-            "/mcp/snapshot",
-            {
-                "url": target_url,
-                "instruction": (instruction or "").strip(),
-                "wait_ms": 3000,
-            },
-            timeout=max(30, get_browser_bridge_timeout()),
-        )
+        request_payload = {
+            "url": target_url,
+            "instruction": (instruction or "").strip(),
+            "wait_ms": 3000,
+        }
+        if browser_worker_is_configured():
+            payload = _browser_worker_request("browser.snapshot", request_payload, timeout=max(30, get_browser_bridge_timeout()))
+        else:
+            payload = _browser_bridge_post("/mcp/snapshot", request_payload, timeout=max(30, get_browser_bridge_timeout()))
     except Exception as exc:
         logger.warning("inspect_local_webpage failed: %s", exc)
         return f"Local webpage snapshot failed: {exc}"
@@ -690,16 +852,16 @@ def interact_local_webpage(url: str = "", steps_json: str = "", instruction: str
         )
 
     try:
-        payload = _browser_bridge_post(
-            "/mcp/interact",
-            {
-                "url": target_url,
-                "instruction": (instruction or "").strip(),
-                "steps": steps,
-                "wait_ms": 1000,
-            },
-            timeout=max(60, get_browser_bridge_timeout(), len(steps) * 15),
-        )
+        request_payload = {
+            "url": target_url,
+            "instruction": (instruction or "").strip(),
+            "steps": steps,
+            "wait_ms": 1000,
+        }
+        if browser_worker_is_configured():
+            payload = _browser_worker_request("browser.interact", request_payload, timeout=max(60, get_browser_bridge_timeout(), len(steps) * 15))
+        else:
+            payload = _browser_bridge_post("/mcp/interact", request_payload, timeout=max(60, get_browser_bridge_timeout(), len(steps) * 15))
     except Exception as exc:
         logger.warning("interact_local_webpage failed: %s", exc)
         return f"Local webpage interaction failed: {exc}"
@@ -858,6 +1020,24 @@ def start_local_comment_hunt(
     local_job_id = job["id"]
     local_job_store.append_progress(local_job_id, f"Created local comment hunt job for keyword: {watch_keyword}")
 
+    if browser_worker_is_configured():
+        local_job_store.run_in_background(
+            local_job_id,
+            _run_worker_interaction_watch_job,
+            local_job_id,
+            url=target_url,
+            keyword=watch_keyword,
+            rounds=rounds,
+            interval_sec=interval_sec,
+            wait_ms=1200,
+            steps=steps,
+            advance_steps=advance_steps,
+            match_extract_names={"visible_comments"},
+        )
+        local_job_store.append_progress(local_job_id, "Browser worker interaction watch started.")
+        emit_runtime_event_sync("job_created", {"job": local_job_store.get(local_job_id)})
+        return encode_meta_payload({"kind": "job_created", "job": local_job_store.get(local_job_id)})
+
     try:
         payload = _browser_bridge_post(
             "/jobs/start",
@@ -920,6 +1100,21 @@ def start_local_webpage_monitor(
     )
     local_job_id = job["id"]
     local_job_store.append_progress(local_job_id, f"Created local webpage watch job for keyword: {watch_keyword}")
+
+    if browser_worker_is_configured():
+        local_job_store.run_in_background(
+            local_job_id,
+            _run_worker_watch_text_job,
+            local_job_id,
+            url=target_url,
+            keyword=watch_keyword,
+            rounds=rounds,
+            interval_sec=interval_sec,
+            wait_ms=3000,
+        )
+        local_job_store.append_progress(local_job_id, "Browser worker text watch started.")
+        emit_runtime_event_sync("job_created", {"job": local_job_store.get(local_job_id)})
+        return encode_meta_payload({"kind": "job_created", "job": local_job_store.get(local_job_id)})
 
     try:
         payload = _browser_bridge_post(

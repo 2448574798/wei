@@ -84,6 +84,10 @@ ONLINE_RESEARCH_MODEL = os.getenv("ONLINE_RESEARCH_MODEL", "gpt-4o-mini-search-p
 ONLINE_RESEARCH_MAX_TOKENS = int(os.getenv("ONLINE_RESEARCH_MAX_TOKENS", "420"))
 AUTH_COOKIE_NAME = os.getenv("AUTH_COOKIE_NAME", "wei_session")
 AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "false").strip().lower() == "true"
+BROWSER_WORKER_ENABLED = os.getenv("BROWSER_WORKER_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+BROWSER_WORKER_TOKEN = os.getenv("BROWSER_WORKER_TOKEN", "").strip()
+BROWSER_WORKER_DEFAULT_ID = os.getenv("BROWSER_WORKER_DEFAULT_ID", "default").strip() or "default"
+BROWSER_WORKER_REQUEST_TIMEOUT = int(os.getenv("BROWSER_WORKER_REQUEST_TIMEOUT", "60"))
 SYSTEM_PROMPT_TEXT = load_system_prompt()
 
 if not ONE_API_TOKEN:

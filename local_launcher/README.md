@@ -8,6 +8,7 @@
 - `Open Interpreter`
 - `Browser Bridge`
 - `Playwright MCP Server` managed by `browser_bridge.py`
+- Optional long-lived `Browser Worker` websocket client inside `browser_bridge.py`
 - Local Chrome/Edge profile reused by Playwright MCP
 
 ## Directory
@@ -80,6 +81,11 @@ BROWSER_BRIDGE_HOST=127.0.0.1
 BROWSER_BRIDGE_PORT=18100
 BROWSER_BRIDGE_TOKEN=replace-with-local-browser-bridge-token
 
+BROWSER_WORKER_ENABLED=true
+BROWSER_WORKER_ID=default
+BROWSER_WORKER_TOKEN=replace-with-browser-worker-token
+BROWSER_WORKER_WS_URL=ws://your-cloud-host:8000/ws/browser-worker
+
 WEI_REDIS_TUNNEL_ENABLED=true
 WEI_REDIS_SSH_USER=ubuntu
 WEI_REDIS_SSH_HOST=43.134.7.123
@@ -109,6 +115,17 @@ Available endpoints:
 - `POST /jobs/start`
 - `GET /jobs/{id}`
 - `POST /jobs/{id}/cancel`
+
+Cloud-side visibility:
+
+- Server `GET /health` now includes `browser_worker_connected`, `browser_execution_ready`, and `browser_workers`
+- Server `GET /api/browser-workers` returns the connected worker list for authenticated troubleshooting
+
+When `BROWSER_WORKER_ENABLED=true` and `BROWSER_WORKER_WS_URL` is set, the same local process also behaves as a thin browser worker:
+
+- It keeps a long-lived websocket connection to the cloud endpoint
+- It preserves local browser profile ownership on the local machine
+- It exposes `browser.tabs`, `browser.navigate`, `browser.snapshot`, and `browser.interact` over that websocket channel
 
 `/mcp/interact` is now MCP-only and supports readonly steps only:
 

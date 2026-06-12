@@ -116,6 +116,35 @@ function updateLocalExecButton() {
     localExecBtnEl.title = localExecutionMode ? "本地执行模式已开启" : "本地执行模式已关闭";
 }
 
+function validateLocalExecutionHealth(health) {
+    if (!localExecutionMode) {
+        return;
+    }
+    if (health?.browser_worker_enabled && !health?.browser_worker_connected) {
+        throw new Error("本地浏览器 Worker 未连接。请先启动 local_launcher\\start_local_services.bat，并确认本机已连上云端 /ws/browser-worker。");
+    }
+    if (!health?.browser_worker_enabled && !health?.browser_bridge_configured) {
+        throw new Error("本地浏览器执行未配置。请配置 Browser Bridge 或启用 Browser Worker。");
+    }
+}
+
+function runtimeStatusSuffix(health) {
+    if (!health) return "";
+    if (localExecutionMode) {
+        if (health.browser_worker_enabled) {
+            return health.browser_worker_connected ? "本地 Worker 已连接" : "本地 Worker 未连接";
+        }
+        if (health.browser_bridge_configured) {
+            return "本地 Browser Bridge 已配置";
+        }
+        return "本地执行未配置";
+    }
+    if (health.browser_worker_enabled) {
+        return health.browser_worker_connected ? "Worker 在线" : "Worker 离线";
+    }
+    return "";
+}
+
 function plannerLabel(route) {
     if (route === "research") return "思考";
     if (route === "agent") return "执行";
@@ -760,6 +789,7 @@ async function sendMessage() {
         if (!health.one_api_token_configured) {
             throw new Error("服务端未配置 ONE_API_TOKEN，请先更新 .env 并重启服务。");
         }
+        validateLocalExecutionHealth(health);
 
         const payload = {
             messages: [{ role: "user", content: userMessage }],
@@ -851,7 +881,7 @@ async function sendMessage() {
             finalPayload.planner_decision?.route ? `路由：${plannerLabel(finalPayload.planner_decision.route)}` : "",
             complexity,
             traceCount ? `工具：${traceCount}` : "",
-            localExecutionMode ? "本地执行模式已生效" : "",
+            runtimeStatusSuffix(appHealth),
         ]
             .filter(Boolean)
             .join(" / ");
@@ -894,7 +924,9 @@ localExecBtnEl.addEventListener("click", () => {
     localExecutionMode = !localExecutionMode;
     updateLocalExecButton();
     persistState();
-    setStatus(localExecutionMode ? "本地执行模式已开启" : "本地执行模式已关闭");
+    const suffix = runtimeStatusSuffix(appHealth);
+    const base = localExecutionMode ? "本地执行模式已开启" : "本地执行模式已关闭";
+    setStatus(suffix ? `${base} / ${suffix}` : base, localExecutionMode && suffix.includes("未连接") ? "warn" : "ok");
 });
 logoutBtnEl.addEventListener("click", async () => {
     try {
@@ -933,8 +965,13 @@ window.addEventListener("orientationchange", setViewportHeight);
 (async () => {
     try {
         await ensureAuthenticated();
+        await refreshHealth();
         loadState();
         resizeInput();
+        const suffix = runtimeStatusSuffix(appHealth);
+        if (suffix) {
+            setStatus(suffix, suffix.includes("未连接") || suffix.includes("离线") ? "warn" : "ok");
+        }
         promptEl.focus();
     } catch (error) {
         console.error(error);

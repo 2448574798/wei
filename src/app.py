@@ -3,7 +3,7 @@ import json
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
@@ -22,6 +22,7 @@ from src.auth_store import (
     init_auth_db,
     verify_password,
 )
+from src.browser_worker_hub import browser_worker_hub
 from src.chat_helpers import (
     append_tool_trace,
     build_tool_trace,
@@ -57,6 +58,9 @@ from src.runtime_config import (
     APP_PORT,
     AUTH_COOKIE_NAME,
     AUTH_COOKIE_SECURE,
+    BROWSER_WORKER_ENABLED,
+    BROWSER_WORKER_DEFAULT_ID,
+    BROWSER_WORKER_TOKEN,
     DISPATCHER_MODEL,
     EXECUTION_MODEL_ADVANCED,
     EXECUTION_MODEL_SIMPLE,
@@ -676,6 +680,8 @@ def build_health_payload() -> dict:
         "smtp_configured": smtp_is_configured(),
         "open_interpreter_configured": open_interpreter_is_configured(),
         "browser_bridge_configured": browser_bridge_is_configured(),
+        "browser_worker_enabled": BROWSER_WORKER_ENABLED,
+        "browser_worker_default_id": BROWSER_WORKER_DEFAULT_ID,
         "checkpointer_backend": getattr(app.state, "checkpointer_backend", "unknown"),
     }
 
@@ -775,7 +781,78 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
-    return build_health_payload()
+    payload = build_health_payload()
+    workers = await browser_worker_hub.list_workers()
+    payload["browser_workers"] = workers
+    payload["browser_worker_connected"] = any(
+        str(item.get("worker_id") or "").strip() == BROWSER_WORKER_DEFAULT_ID
+        for item in workers
+        if isinstance(item, dict)
+    )
+    payload["browser_execution_ready"] = (
+        payload["browser_worker_connected"]
+        if BROWSER_WORKER_ENABLED
+        else payload["browser_bridge_configured"]
+    )
+    return payload
+
+
+@app.get("/api/browser-workers")
+async def browser_workers(request: Request):
+    require_authenticated_user(request)
+    workers = await browser_worker_hub.list_workers()
+    default_connected = any(
+        str(item.get("worker_id") or "").strip() == BROWSER_WORKER_DEFAULT_ID
+        for item in workers
+        if isinstance(item, dict)
+    )
+    return {
+        "enabled": BROWSER_WORKER_ENABLED,
+        "default_worker_id": BROWSER_WORKER_DEFAULT_ID,
+        "default_worker_connected": default_connected,
+        "workers": workers,
+    }
+
+
+@app.websocket("/ws/browser-worker")
+async def browser_worker_socket(websocket: WebSocket):
+    await websocket.accept()
+    worker_id = ""
+    try:
+        register_message = await websocket.receive_json()
+        if not isinstance(register_message, dict):
+            await websocket.send_json({"type": "error", "detail": "Register message must be a JSON object."})
+            await websocket.close(code=1003)
+            return
+        if str(register_message.get("type") or "").strip().lower() != "register":
+            await websocket.send_json({"type": "error", "detail": "The first websocket message must be a register event."})
+            await websocket.close(code=1003)
+            return
+
+        token = str(register_message.get("token") or "").strip()
+        if BROWSER_WORKER_TOKEN and token != BROWSER_WORKER_TOKEN:
+            await websocket.send_json({"type": "error", "detail": "Unauthorized browser worker token."})
+            await websocket.close(code=1008)
+            return
+
+        worker_id = str(register_message.get("worker_id") or BROWSER_WORKER_DEFAULT_ID).strip() or BROWSER_WORKER_DEFAULT_ID
+        meta = {
+            "profile_path": str(register_message.get("profile_path") or "").strip(),
+            "capabilities": register_message.get("capabilities") if isinstance(register_message.get("capabilities"), list) else [],
+            "connected_at": datetime.now().isoformat(),
+        }
+        await browser_worker_hub.register(worker_id, websocket, meta=meta)
+        await websocket.send_json({"type": "registered", "worker_id": worker_id, "meta": meta})
+
+        while True:
+            message = await websocket.receive_json()
+            if isinstance(message, dict):
+                await browser_worker_hub.handle_message(worker_id, message)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if worker_id:
+            await browser_worker_hub.unregister(worker_id, websocket)
 
 
 @app.get("/api/auth/me")

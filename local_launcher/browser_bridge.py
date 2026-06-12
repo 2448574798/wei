@@ -15,11 +15,20 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from websockets.exceptions import ConnectionClosed
+from websockets.sync.client import connect as websocket_connect
+
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 18100
 DEFAULT_USER_DATA_DIR = Path(r"D:\Download\playwright-user-data\edge-douyin-bridge")
 DEFAULT_MCP_PROTOCOL_VERSION = "2025-11-25"
+VERIFICATION_PAGE_MARKERS = (
+    "\u9a8c\u8bc1\u7801\u4e2d\u95f4\u9875",
+    "\u8bf7\u5b8c\u6210\u4e0b\u5217\u9a8c\u8bc1\u540e\u7ee7\u7eed",
+    "\u62d6\u52a8\u5b8c\u6210\u4e0a\u65b9\u62fc\u56fe",
+    "\u6309\u4f4f\u5de6\u8fb9\u6309\u94ae\u62d6\u52a8\u5b8c\u6210\u4e0a\u65b9\u62fc\u56fe",
+)
 
 
 @dataclass
@@ -492,6 +501,39 @@ def _json_string(value: str) -> str:
     return json.dumps(str(value or ""), ensure_ascii=False)
 
 
+def _manual_verification_message(title: str, text: str, url: str = "") -> str:
+    combined = "\n".join(part for part in (title, text, url) if part).strip()
+    if not combined:
+        return ""
+    for marker in VERIFICATION_PAGE_MARKERS:
+        if marker in combined:
+            return (
+                "Manual verification required: the current page is blocked by a captcha/verification challenge. "
+                "Complete it in the local browser, then retry."
+            )
+    return ""
+
+
+def _friendly_bridge_error_message(message: str) -> str:
+    detail = re.sub(r"\s+", " ", str(message or "").strip())
+    if not detail:
+        return detail
+    if "Target page, context or browser has been closed" in detail and "--user-data-dir=" in detail:
+        profile_match = re.search(r"--user-data-dir=([^\s]+)", detail)
+        profile_path = profile_match.group(1).strip('"') if profile_match else ""
+        if profile_path:
+            return (
+                "Playwright MCP could not launch the browser profile. "
+                f"Close any Chrome windows using {profile_path}, then retry. "
+                "Do not manually open that same profile before Browser Bridge starts."
+            )
+        return (
+            "Playwright MCP could not launch the browser profile. "
+            "Close any Chrome windows using the MCP profile, then retry."
+        )
+    return detail
+
+
 def _mcp_target_to_selector(target: dict[str, Any], *, default_first: bool) -> str:
     selector = ""
     if str(target.get("selector") or "").strip():
@@ -619,6 +661,12 @@ class BrowserBridge:
         self.token = os.getenv("BROWSER_BRIDGE_TOKEN", "").strip()
         self.user_data_dir = self._resolve_user_data_dir()
         self.playwright_mcp = PlaywrightMcpClient(user_data_dir=self.user_data_dir)
+        self.worker_enabled = os.getenv("BROWSER_WORKER_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+        self.worker_id = str(os.getenv("BROWSER_WORKER_ID", "").strip() or "default")
+        self.worker_token = os.getenv("BROWSER_WORKER_TOKEN", "").strip()
+        self.worker_ws_url = self._resolve_worker_ws_url()
+        self.worker_reconnect_sec = max(3, min(int(os.getenv("BROWSER_WORKER_RECONNECT_SEC", "5") or "5"), 60))
+        self._worker_thread: threading.Thread | None = None
 
         self._jobs_lock = threading.Lock()
         self._jobs: dict[str, BrowserJob] = {}
@@ -627,10 +675,29 @@ class BrowserBridge:
         configured = os.getenv("PLAYWRIGHT_USER_DATA_DIR", "").strip()
         return Path(configured) if configured else DEFAULT_USER_DATA_DIR
 
+    def _resolve_worker_ws_url(self) -> str:
+        configured = os.getenv("BROWSER_WORKER_WS_URL", "").strip()
+        if not configured:
+            return ""
+        if configured.startswith("http://"):
+            configured = "ws://" + configured[len("http://") :]
+        elif configured.startswith("https://"):
+            configured = "wss://" + configured[len("https://") :]
+        return configured
+
     def _append_job_progress(self, job: BrowserJob, message: str) -> None:
         text = re.sub(r"\s+", " ", (message or "").strip())
         if text:
             job.progress.append(text)
+
+    def worker_status(self) -> dict[str, Any]:
+        return {
+            "enabled": self.worker_enabled,
+            "worker_id": self.worker_id,
+            "ws_url": self.worker_ws_url,
+            "profile_path": str(self.user_data_dir),
+            "thread_alive": bool(self._worker_thread and self._worker_thread.is_alive()),
+        }
 
     def playwright_mcp_status(self, *, ensure_started: bool = False, refresh_tools: bool = False) -> dict[str, Any]:
         return self.playwright_mcp.status(ensure_started=ensure_started, refresh_tools=refresh_tools)
@@ -640,6 +707,35 @@ class BrowserBridge:
 
     def restart_playwright_mcp(self) -> dict[str, Any]:
         return self.playwright_mcp.restart()
+
+    def handle_worker_command(self, command: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        command_name = str(command or "").strip().lower()
+        data = payload if isinstance(payload, dict) else {}
+        if command_name == "browser.tabs":
+            return self.playwright_mcp_tabs()
+        if command_name == "browser.navigate":
+            return self.playwright_mcp_navigate(str(data.get("url") or "").strip())
+        if command_name == "browser.snapshot":
+            return self.playwright_mcp_snapshot(
+                url=str(data.get("url") or "").strip(),
+                instruction=str(data.get("instruction") or "").strip(),
+                wait_ms=int(data.get("wait_ms") or 3000),
+                target=str(data.get("target") or "").strip(),
+                depth=int(data["depth"]) if data.get("depth") is not None else None,
+            )
+        if command_name == "browser.interact":
+            return self.interact_prefer_mcp_readonly(
+                url=str(data.get("url") or "").strip(),
+                instruction=str(data.get("instruction") or "").strip(),
+                steps=data.get("steps") if isinstance(data.get("steps"), list) else [],
+                wait_ms=int(data.get("wait_ms") or 1000),
+            )
+        if command_name == "browser.status":
+            return {
+                "worker": self.worker_status(),
+                "playwright_mcp": self.playwright_mcp_status(ensure_started=True),
+            }
+        raise ValueError(f"Unsupported browser worker command: {command_name or '<empty>'}")
 
     def playwright_mcp_tabs(self) -> dict[str, Any]:
         result = self.playwright_mcp.call_tool("browser_tabs", {"action": "list"})
@@ -764,6 +860,22 @@ class BrowserBridge:
             raise RuntimeError(str(result.get("text") or "Playwright MCP browser_snapshot failed.").strip())
         return _compact_text(str(result.get("text_raw") or result.get("text") or ""), limit)
 
+    def _raise_if_manual_verification_page(self, *, instruction: str = "", url: str = "") -> None:
+        snapshot = self.playwright_mcp_snapshot(
+            url="",
+            instruction=instruction,
+            wait_ms=0,
+            target="body >> nth=0",
+        )
+        title = str(snapshot.get("title") or "").strip()
+        current_url = str(snapshot.get("url") or url or "").strip()
+        text = str(snapshot.get("text") or "").strip()
+        manual_notice = _manual_verification_message(title, text, current_url)
+        if manual_notice:
+            raise RuntimeError(
+                f"{manual_notice} Page title: {title or '-'} Page URL: {current_url or '-'}"
+            )
+
     def playwright_mcp_snapshot(
         self,
         *,
@@ -822,6 +934,7 @@ class BrowserBridge:
             self.playwright_mcp_navigate(target_url)
         if wait_ms > 0:
             self._playwright_mcp_wait(wait_ms)
+        self._raise_if_manual_verification_page(instruction=instruction, url=target_url)
 
         extracts: list[dict[str, Any]] = []
         step_results: list[dict[str, Any]] = []
@@ -900,6 +1013,7 @@ class BrowserBridge:
                     if bool(step.get("optional")):
                         step_results.append({"index": index, "type": step_type, "status": "skipped"})
                         continue
+                    self._raise_if_manual_verification_page(instruction=instruction, url=target_url)
                     raise RuntimeError(f"Step {index} click_any failed: {last_error}")
                 if wait_after <= 0:
                     wait_after = min(timeout_ms, 1500)
@@ -938,6 +1052,7 @@ class BrowserBridge:
                     except Exception as exc:
                         last_error = str(exc)
                 if last_error:
+                    self._raise_if_manual_verification_page(instruction=instruction, url=target_url)
                     raise RuntimeError(f"Step {index} extract_any_text failed: {last_error}")
                 name = str(step.get("name") or f"extract_{index}").strip()
                 extracts.append({"name": name, "text": extracted_text})
@@ -971,6 +1086,7 @@ class BrowserBridge:
                     except Exception as exc:
                         last_error = str(exc)
                 if last_error:
+                    self._raise_if_manual_verification_page(instruction=instruction, url=target_url)
                     raise RuntimeError(f"Step {index} extract_list_text failed: {last_error}")
                 name = str(step.get("name") or f"extract_{index}").strip()
                 extracts.append({"name": name, "text": joiner.join(extracted_items)})
@@ -1083,7 +1199,7 @@ class BrowserBridge:
                     job.result = "Job cancelled."
                     return
 
-                snapshot = self.snapshot(url, instruction=keyword, wait_ms=wait_ms)
+                snapshot = self.playwright_mcp_snapshot(url=url, instruction=keyword, wait_ms=wait_ms)
                 text = str(snapshot.get("text") or "")
                 excerpt = text[:240] or "[No body text extracted]"
                 self._append_job_progress(job, f"Round {index + 1}: {excerpt}")
@@ -1235,6 +1351,74 @@ class BrowserBridge:
             self._append_job_progress(job, "Cancellation requested.")
             return job.to_dict()
 
+    def start_worker_client(self) -> None:
+        if not self.worker_enabled or not self.worker_ws_url:
+            return
+        if self._worker_thread and self._worker_thread.is_alive():
+            return
+        self._worker_thread = threading.Thread(target=self._worker_client_loop, daemon=True)
+        self._worker_thread.start()
+
+    def _worker_client_loop(self) -> None:
+        while True:
+            try:
+                self._run_worker_client_session()
+            except Exception as exc:
+                print(f"Browser worker session error: {exc}")
+            time.sleep(self.worker_reconnect_sec)
+
+    def _run_worker_client_session(self) -> None:
+        headers = {}
+        if self.worker_token:
+            headers["Authorization"] = f"Bearer {self.worker_token}"
+        with websocket_connect(self.worker_ws_url, additional_headers=headers, open_timeout=15, close_timeout=5) as websocket:
+            websocket.send(
+                json.dumps(
+                    {
+                        "type": "register",
+                        "worker_id": self.worker_id,
+                        "token": self.worker_token,
+                        "profile_path": str(self.user_data_dir),
+                        "capabilities": ["browser.tabs", "browser.navigate", "browser.snapshot", "browser.interact"],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            registered = json.loads(websocket.recv(timeout=15))
+            if str(registered.get("type") or "").strip().lower() != "registered":
+                raise RuntimeError(str(registered.get("detail") or "Browser worker registration failed.").strip())
+            print(f"Browser worker connected: {self.worker_id} -> {self.worker_ws_url}")
+
+            while True:
+                try:
+                    raw_message = websocket.recv(timeout=30)
+                except TimeoutError:
+                    websocket.send(json.dumps({"type": "heartbeat", "at": time.time()}, ensure_ascii=False))
+                    continue
+                except ConnectionClosed:
+                    break
+
+                message = json.loads(raw_message)
+                if not isinstance(message, dict):
+                    continue
+                if str(message.get("type") or "").strip().lower() != "command":
+                    continue
+
+                request_id = str(message.get("request_id") or "").strip()
+                command = str(message.get("command") or "").strip()
+                payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+                try:
+                    result = self.handle_worker_command(command, payload)
+                    response = {"type": "response", "request_id": request_id, "ok": True, "payload": result}
+                except Exception as exc:
+                    response = {
+                        "type": "response",
+                        "request_id": request_id,
+                        "ok": False,
+                        "error": _friendly_bridge_error_message(str(exc)),
+                    }
+                websocket.send(json.dumps(response, ensure_ascii=False))
+
 
 bridge = BrowserBridge()
 
@@ -1251,6 +1435,7 @@ class BrowserBridgeHandler(BaseHTTPRequestHandler):
                     {
                         "status": "ok",
                         "playwright_mcp": bridge.playwright_mcp_status(),
+                        "browser_worker": bridge.worker_status(),
                         "host": bridge.host,
                         "port": bridge.port,
                     },
@@ -1375,29 +1560,32 @@ class BrowserBridgeHandler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def _send_error_json(self, exc: Exception) -> None:
+        detail = _friendly_bridge_error_message(str(exc))
         if isinstance(exc, PermissionError):
-            self._send_json(HTTPStatus.UNAUTHORIZED, {"detail": str(exc)})
+            self._send_json(HTTPStatus.UNAUTHORIZED, {"detail": detail})
             return
         if isinstance(exc, FileNotFoundError):
-            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"detail": str(exc)})
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"detail": detail})
             return
         if isinstance(exc, ValueError):
-            self._send_json(HTTPStatus.BAD_REQUEST, {"detail": str(exc)})
+            self._send_json(HTTPStatus.BAD_REQUEST, {"detail": detail})
             return
         if isinstance(exc, subprocess.TimeoutExpired):
-            self._send_json(HTTPStatus.GATEWAY_TIMEOUT, {"detail": str(exc)})
+            self._send_json(HTTPStatus.GATEWAY_TIMEOUT, {"detail": detail})
             return
-        self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"detail": str(exc)})
+        self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"detail": detail})
 
     def log_message(self, format: str, *args: Any) -> None:
         return
 
 
 def main() -> int:
+    bridge.start_worker_client()
     server = ThreadingHTTPServer((bridge.host, bridge.port), BrowserBridgeHandler)
     print(f"Browser Bridge listening on http://{bridge.host}:{bridge.port}")
     print(f"User data dir: {bridge.user_data_dir}")
     print(f"Playwright MCP command: {bridge.playwright_mcp.command}")
+    print(f"Browser worker: {bridge.worker_status()}")
     if bridge.token:
         print("Auth token: configured")
     else:
