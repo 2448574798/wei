@@ -14,12 +14,17 @@ import requests
 from bs4 import BeautifulSoup
 from websockets.sync.client import connect
 
+from src.browser_orchestrator import (
+    browser_bridge_is_configured,
+    browser_orchestrator,
+    browser_worker_is_configured,
+    get_browser_bridge_timeout,
+)
 from src.execution_context import emit_runtime_event_sync, get_execution_context
-from src.browser_worker_hub import browser_worker_hub
 from src.human_loop import confirmation_store
 from src.local_jobs import local_job_store
 from src.research_client import call_online_research_model
-from src.runtime_config import BROWSER_WORKER_DEFAULT_ID, BROWSER_WORKER_ENABLED, BROWSER_WORKER_REQUEST_TIMEOUT, ONLINE_RESEARCH_MODEL
+from src.runtime_config import ONLINE_RESEARCH_MODEL
 
 
 logger = logging.getLogger("wei_agent")
@@ -75,38 +80,6 @@ def get_open_interpreter_auth_key() -> str:
 
 def open_interpreter_is_configured() -> bool:
     return bool(get_open_interpreter_url())
-
-
-def get_browser_bridge_url() -> str:
-    url = os.getenv("BROWSER_BRIDGE_URL", "").strip().rstrip("/")
-    if url:
-        return url
-    host = os.getenv("BROWSER_BRIDGE_HOST", "").strip()
-    port = os.getenv("BROWSER_BRIDGE_PORT", "").strip()
-    if host and port:
-        return f"http://{host}:{port}"
-    return ""
-
-
-def get_browser_bridge_token() -> str:
-    return os.getenv("BROWSER_BRIDGE_TOKEN", "").strip()
-
-
-def get_browser_bridge_timeout() -> int:
-    return int(os.getenv("BROWSER_BRIDGE_TIMEOUT", "60"))
-
-
-def browser_bridge_is_configured() -> bool:
-    return bool(get_browser_bridge_url())
-
-
-def get_browser_worker_id() -> str:
-    configured = os.getenv("BROWSER_WORKER_ID", "").strip()
-    return configured or BROWSER_WORKER_DEFAULT_ID
-
-
-def browser_worker_is_configured() -> bool:
-    return BROWSER_WORKER_ENABLED
 
 
 def smtp_is_configured() -> bool:
@@ -239,63 +212,8 @@ def _format_open_interpreter_result(code: str, output: str) -> str:
     return normalized
 
 
-def _browser_bridge_headers() -> dict[str, str]:
-    token = get_browser_bridge_token()
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
-
-
-def _browser_bridge_url(path: str) -> str:
-    base_url = get_browser_bridge_url()
-    if not base_url:
-        raise RuntimeError("BROWSER_BRIDGE_URL is not configured.")
-    return base_url + path
-
-
-def _browser_bridge_get(path: str, timeout: int | None = None) -> dict:
-    response = requests.get(
-        _browser_bridge_url(path),
-        headers=_browser_bridge_headers(),
-        timeout=timeout or get_browser_bridge_timeout(),
-    )
-    if not response.ok:
-        detail = ""
-        with suppress(Exception):
-            payload = response.json()
-            detail = str(payload.get("detail") or "").strip()
-        message = detail or response.text.strip() or response.reason or f"HTTP {response.status_code}"
-        raise RuntimeError(f"Browser Bridge GET {path} failed: {message}")
-    return response.json()
-
-
-def _browser_bridge_post(path: str, payload: dict, timeout: int | None = None) -> dict:
-    response = requests.post(
-        _browser_bridge_url(path),
-        headers=_browser_bridge_headers(),
-        json=payload,
-        timeout=timeout or get_browser_bridge_timeout(),
-    )
-    if not response.ok:
-        detail = ""
-        with suppress(Exception):
-            data = response.json()
-            detail = str(data.get("detail") or "").strip()
-        message = detail or response.text.strip() or response.reason or f"HTTP {response.status_code}"
-        raise RuntimeError(f"Browser Bridge POST {path} failed: {message}")
-    return response.json()
-
-
 def _browser_worker_request(command: str, payload: dict, timeout: int | None = None) -> dict:
-    worker_id = get_browser_worker_id()
-    if not worker_id:
-        raise RuntimeError("BROWSER_WORKER_ID is not configured.")
-    timeout_sec = timeout or BROWSER_WORKER_REQUEST_TIMEOUT
-    try:
-        return browser_worker_hub.request_sync(worker_id, command, payload, timeout_sec=timeout_sec)
-    except Exception as exc:
-        raise RuntimeError(f"Browser worker {command} failed: {exc}") from exc
+    return browser_orchestrator.request(command, payload, timeout=timeout)
 
 
 def _run_worker_watch_text_job(
@@ -440,13 +358,10 @@ def _mirror_browser_bridge_job(local_job_id: str, remote_job_id: str) -> str:
     while True:
         if local_job_store.is_cancel_requested(local_job_id) and not cancel_sent:
             cancel_sent = True
-            try:
-                _browser_bridge_post(f"/jobs/{remote_job_id}/cancel", {})
-                local_job_store.append_progress(local_job_id, "Sent a cancellation request to Browser Bridge.")
-            except Exception as exc:
-                local_job_store.append_progress(local_job_id, f"Failed to send cancellation request: {exc}")
+            browser_orchestrator.cancel_legacy_job(remote_job_id)
+            local_job_store.append_progress(local_job_id, "Sent a cancellation request to Browser Bridge.")
 
-        payload = _browser_bridge_get(f"/jobs/{remote_job_id}", timeout=15)
+        payload = browser_orchestrator.get_legacy_job(remote_job_id, timeout=15)
         progress_items = payload.get("progress", [])
         for item in progress_items[seen_progress:]:
             local_job_store.append_progress(local_job_id, item)
@@ -673,7 +588,7 @@ def send_email(to: str, subject: str, body: str) -> str:
 
 
 def open_local_browser_page(url: str) -> str:
-    """Open a webpage through the local Browser Bridge."""
+    """Open a webpage through the cloud browser orchestrator."""
     target_url = (url or "").strip()
     if not target_url:
         return "Local webpage URL cannot be empty."
@@ -681,10 +596,7 @@ def open_local_browser_page(url: str) -> str:
         target_url = "https://" + target_url
 
     try:
-        if browser_worker_is_configured():
-            payload = _browser_worker_request("browser.navigate", {"url": target_url}, timeout=30)
-        else:
-            payload = _browser_bridge_post("/mcp/navigate", {"url": target_url}, timeout=30)
+        payload = browser_orchestrator.request("browser.navigate", {"url": target_url}, timeout=30)
     except Exception as exc:
         logger.warning("open_local_browser_page failed: %s", exc)
         return f"Open local webpage failed: {exc}"
@@ -715,12 +627,9 @@ def open_local_browser_page(url: str) -> str:
 
 
 def list_local_browser_tabs() -> str:
-    """List local browser tabs through Playwright MCP via Browser Bridge."""
+    """List local browser tabs through the cloud browser orchestrator."""
     try:
-        if browser_worker_is_configured():
-            payload = _browser_worker_request("browser.tabs", {}, timeout=20)
-        else:
-            payload = _browser_bridge_get("/mcp/tabs", timeout=20)
+        payload = browser_orchestrator.request("browser.tabs", {}, timeout=20)
     except Exception as exc:
         logger.warning("list_local_browser_tabs failed: %s", exc)
         return f"List local browser tabs failed: {exc}"
@@ -746,7 +655,7 @@ def list_local_browser_tabs() -> str:
 
 
 def inspect_local_webpage(url: str, instruction: str = "") -> str:
-    """Open a webpage through Browser Bridge and return a text snapshot."""
+    """Open a webpage through the cloud browser orchestrator and return a text snapshot."""
     target_url = (url or "").strip()
     if not target_url:
         return "Local webpage URL cannot be empty."
@@ -759,10 +668,7 @@ def inspect_local_webpage(url: str, instruction: str = "") -> str:
             "instruction": (instruction or "").strip(),
             "wait_ms": 3000,
         }
-        if browser_worker_is_configured():
-            payload = _browser_worker_request("browser.snapshot", request_payload, timeout=max(30, get_browser_bridge_timeout()))
-        else:
-            payload = _browser_bridge_post("/mcp/snapshot", request_payload, timeout=max(30, get_browser_bridge_timeout()))
+        payload = browser_orchestrator.request("browser.snapshot", request_payload, timeout=max(30, get_browser_bridge_timeout()))
     except Exception as exc:
         logger.warning("inspect_local_webpage failed: %s", exc)
         return f"Local webpage snapshot failed: {exc}"
@@ -818,7 +724,7 @@ def _steps_prefer_mcp_readonly(steps: list[dict]) -> bool:
 
 
 def interact_local_webpage(url: str = "", steps_json: str = "", instruction: str = "") -> str:
-    """Interact with a local webpage through Browser Bridge using a JSON array of steps.
+    """Interact with a local webpage through the cloud browser orchestrator using a JSON array of steps.
 
     Supported step types include click, click_any, wait, fill, press, extract_text,
     extract_any_text, snapshot, and goto. A step can target selector, text, role,
@@ -858,10 +764,7 @@ def interact_local_webpage(url: str = "", steps_json: str = "", instruction: str
             "steps": steps,
             "wait_ms": 1000,
         }
-        if browser_worker_is_configured():
-            payload = _browser_worker_request("browser.interact", request_payload, timeout=max(60, get_browser_bridge_timeout(), len(steps) * 15))
-        else:
-            payload = _browser_bridge_post("/mcp/interact", request_payload, timeout=max(60, get_browser_bridge_timeout(), len(steps) * 15))
+        payload = browser_orchestrator.request("browser.interact", request_payload, timeout=max(60, get_browser_bridge_timeout(), len(steps) * 15))
     except Exception as exc:
         logger.warning("interact_local_webpage failed: %s", exc)
         return f"Local webpage interaction failed: {exc}"
@@ -1039,8 +942,7 @@ def start_local_comment_hunt(
         return encode_meta_payload({"kind": "job_created", "job": local_job_store.get(local_job_id)})
 
     try:
-        payload = _browser_bridge_post(
-            "/jobs/start",
+        payload = browser_orchestrator.start_legacy_job(
             {
                 "job_type": "interaction_watch",
                 "url": target_url,
@@ -1078,7 +980,7 @@ def start_local_webpage_monitor(
     rounds: int = 20,
     interval_sec: int = 8,
 ) -> str:
-    """Start a Browser Bridge watch job and mirror it into the server-side local job store."""
+    """Start a local browser watch job and mirror it into the server-side local job store."""
     target_url = (url or "").strip()
     watch_keyword = (keyword or "").strip()
     if not target_url:
@@ -1117,8 +1019,7 @@ def start_local_webpage_monitor(
         return encode_meta_payload({"kind": "job_created", "job": local_job_store.get(local_job_id)})
 
     try:
-        payload = _browser_bridge_post(
-            "/jobs/start",
+        payload = browser_orchestrator.start_legacy_job(
             {
                 "job_type": "watch_text",
                 "url": target_url,

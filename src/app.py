@@ -22,6 +22,7 @@ from src.auth_store import (
     init_auth_db,
     verify_password,
 )
+from src.browser_orchestrator import browser_bridge_is_configured
 from src.browser_worker_hub import browser_worker_hub
 from src.chat_helpers import (
     append_tool_trace,
@@ -77,7 +78,6 @@ from src.runtime_config import (
 )
 from src.tools import (
     ask_open_interpreter,
-    browser_bridge_is_configured,
     decode_meta_payload,
     interact_local_webpage,
     inspect_local_webpage,
@@ -680,6 +680,11 @@ def build_health_payload() -> dict:
         "smtp_configured": smtp_is_configured(),
         "open_interpreter_configured": open_interpreter_is_configured(),
         "browser_bridge_configured": browser_bridge_is_configured(),
+        "browser_orchestrator": {
+            "name": "cloud_browser_orchestrator",
+            "preferred_transport": "websocket",
+            "legacy_bridge_fallback": not BROWSER_WORKER_ENABLED,
+        },
         "browser_worker_enabled": BROWSER_WORKER_ENABLED,
         "browser_worker_default_id": BROWSER_WORKER_DEFAULT_ID,
         "checkpointer_backend": getattr(app.state, "checkpointer_backend", "unknown"),

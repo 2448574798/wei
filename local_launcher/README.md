@@ -6,10 +6,22 @@
 
 - `frpc`
 - `Open Interpreter`
-- `Browser Bridge`
-- `Playwright MCP Server` managed by `browser_bridge.py`
-- Optional long-lived `Browser Worker` websocket client inside `browser_bridge.py`
+- `Local Thin Browser Worker` inside `browser_bridge.py`
+- `Playwright MCP Server` managed by the local worker
 - Local Chrome/Edge profile reused by Playwright MCP
+
+Browser execution is now shaped as:
+
+```text
+Cloud Wei Agent
+  -> Cloud Browser Orchestrator / Task Core
+  -> WebSocket long connection
+  -> Local Thin Browser Worker
+  -> Playwright MCP
+  -> Local Edge / Chrome
+```
+
+The local HTTP Browser Bridge endpoints are kept for local troubleshooting and older launchers. In normal cloud mode, the cloud server should use the worker WebSocket path.
 
 ## Directory
 
@@ -46,7 +58,7 @@ It starts:
 
 - `frpc`
 - `Open Interpreter`
-- `Browser Bridge`
+- `Local Thin Browser Worker / Browser Bridge`
 
 ## Open Douyin
 
@@ -56,7 +68,7 @@ Run:
 local_launcher\open_douyin_edge.bat
 ```
 
-This script no longer launches a separate Playwright runner. It reuses the running Browser Bridge and calls `POST /mcp/navigate` to open the configured URL.
+This script no longer launches a separate Playwright runner. It reuses the running local browser worker process and calls the local `POST /mcp/navigate` troubleshooting endpoint.
 
 ## Local env example
 
@@ -75,7 +87,7 @@ OPEN_INTERPRETER_TIMEOUT=90
 
 PLAYWRIGHT_PYTHON_EXE=D:\Download\oi-env-310\Scripts\python.exe
 PLAYWRIGHT_DEFAULT_URL=https://www.douyin.com/
-PLAYWRIGHT_USER_DATA_DIR=D:\Download\playwright-user-data\chrome-douyin-mcp
+PLAYWRIGHT_USER_DATA_DIR=D:\Download\playwright-user-data\edge-douyin-worker
 
 BROWSER_BRIDGE_HOST=127.0.0.1
 BROWSER_BRIDGE_PORT=18100
@@ -84,7 +96,7 @@ BROWSER_BRIDGE_TOKEN=replace-with-local-browser-bridge-token
 BROWSER_WORKER_ENABLED=true
 BROWSER_WORKER_ID=default
 BROWSER_WORKER_TOKEN=replace-with-browser-worker-token
-BROWSER_WORKER_WS_URL=ws://your-cloud-host:8000/ws/browser-worker
+BROWSER_WORKER_WS_URL=wss://sunw.chat/ws/browser-worker
 
 WEI_REDIS_TUNNEL_ENABLED=true
 WEI_REDIS_SSH_USER=ubuntu
@@ -94,13 +106,13 @@ WEI_REDIS_REMOTE_PORT=6379
 
 PLAYWRIGHT_MCP_ENABLED=true
 PLAYWRIGHT_MCP_COMMAND=C:\Program Files\nodejs\npx.cmd
-PLAYWRIGHT_MCP_ARGS_JSON=["@playwright/mcp@latest","--browser=chrome","--user-data-dir=D:\\Download\\playwright-user-data\\chrome-douyin-mcp"]
+PLAYWRIGHT_MCP_ARGS_JSON=["@playwright/mcp@latest","--browser=msedge","--user-data-dir=D:\\Download\\playwright-user-data\\edge-douyin-worker"]
 PLAYWRIGHT_MCP_PROTOCOL_VERSION=2025-11-25
 PLAYWRIGHT_MCP_STARTUP_TIMEOUT=30
 PLAYWRIGHT_MCP_REQUEST_TIMEOUT=120
 ```
 
-## Browser Bridge API
+## Local Browser Worker API
 
 Available endpoints:
 
@@ -115,6 +127,12 @@ Available endpoints:
 - `POST /jobs/start`
 - `GET /jobs/{id}`
 - `POST /jobs/{id}/cancel`
+
+Cloud-side orchestration:
+
+- Agent tools call the cloud browser orchestrator in `src/browser_orchestrator.py`
+- When `BROWSER_WORKER_ENABLED=true`, browser commands are sent over `/ws/browser-worker`
+- The legacy HTTP Browser Bridge fallback is used only when worker mode is disabled
 
 Cloud-side visibility:
 

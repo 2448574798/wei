@@ -163,6 +163,25 @@ class PlaywrightMcpClient:
             self.ensure_ready(refresh_tools=True)
         return self.status()
 
+    def _terminate_process_tree(self, process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return
+
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
     def stop(self) -> None:
         with self._lock:
             process = self._process
@@ -173,13 +192,8 @@ class PlaywrightMcpClient:
             self._tool_cache = []
             self._tool_cache_at = 0.0
 
-        if process and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+        if process:
+            self._terminate_process_tree(process)
 
         self._fail_pending("Playwright MCP server stopped.")
 
