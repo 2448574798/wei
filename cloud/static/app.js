@@ -551,6 +551,45 @@ function pollLocalJob(jobId, onUpdate, shouldContinue = () => true) {
     };
 }
 
+function streamLocalJob(jobId, handlers = {}, shouldContinue = () => true) {
+    if (!window.EventSource) return null;
+    const source = new EventSource(`/api/jobs/${encodeURIComponent(jobId)}/stream`, { withCredentials: true });
+    let closed = false;
+
+    const close = () => {
+        if (closed) return;
+        closed = true;
+        source.close();
+    };
+
+    const handleJson = (event, callback) => {
+        if (!shouldContinue()) {
+            close();
+            return;
+        }
+        try {
+            callback(JSON.parse(event.data || "{}"));
+        } catch (error) {
+            console.error("job stream parse failed", error);
+        }
+    };
+
+    source.addEventListener("job_snapshot", (event) => handleJson(event, (data) => handlers.onSnapshot?.(data.job)));
+    source.addEventListener("job_progress", (event) => handleJson(event, (data) => handlers.onProgress?.(data)));
+    source.addEventListener("job_artifact", (event) => handleJson(event, (data) => handlers.onArtifact?.(data)));
+    source.addEventListener("job_finished", (event) => handleJson(event, (data) => {
+        handlers.onSnapshot?.(data.job);
+        handlers.onFinished?.(data.job);
+        close();
+    }));
+    source.addEventListener("job_missing", () => close());
+    source.onerror = () => {
+        close();
+        handlers.onError?.();
+    };
+    return close;
+}
+
 function getJobResultPayload(job) {
     if (job?.result_payload && typeof job.result_payload === "object") {
         return job.result_payload;
@@ -742,6 +781,39 @@ function appendInteractivePanel(wrapper, meta) {
         const statusEl = panel.querySelector(".job-status");
         const resultEl = panel.querySelector(".job-result");
         const logEl = panel.querySelector(".interactive-log");
+        let currentJob = {
+            ...meta.pendingJob,
+            progress: Array.isArray(meta.pendingJob.progress) ? [...meta.pendingJob.progress] : [],
+            artifacts: Array.isArray(meta.pendingJob.artifacts) ? [...meta.pendingJob.artifacts] : [],
+        };
+        const renderJob = (job) => {
+            if (!job) return;
+            currentJob = {
+                ...currentJob,
+                ...job,
+                progress: Array.isArray(job.progress) ? job.progress : currentJob.progress,
+                artifacts: Array.isArray(job.artifacts) ? job.artifacts : currentJob.artifacts,
+            };
+            statusEl.textContent = `鐘舵€侊細${currentJob.status}`;
+            logEl.innerHTML = (currentJob.progress || [])
+                .slice(-24)
+                .map((line) => `<div class="loading-progress-item">${escapeHtml(line)}</div>`)
+                .join("");
+            logEl.scrollTop = logEl.scrollHeight;
+            resultEl.innerHTML = buildJobResultHtml(currentJob);
+        };
+        const appendJobProgress = (message) => {
+            const text = String(message || "").trim();
+            if (!text) return;
+            currentJob.progress = [...(currentJob.progress || []), text];
+            renderJob(currentJob);
+        };
+        const appendJobArtifact = (artifact) => {
+            if (!artifact || typeof artifact !== "object") return;
+            currentJob.artifacts = [...(currentJob.artifacts || []), artifact];
+            renderJob(currentJob);
+        };
+        renderJob(currentJob);
         panel.querySelector('[data-action="cancel-job"]').addEventListener("click", async () => {
             await fetch(`/api/jobs/${encodeURIComponent(meta.pendingJob.id)}/cancel`, {
                 method: "POST",
@@ -749,10 +821,16 @@ function appendInteractivePanel(wrapper, meta) {
             });
             statusEl.textContent = "状态：已请求取消";
         });
+        streamLocalJob(meta.pendingJob.id, {
+            onSnapshot: renderJob,
+            onProgress: (data) => appendJobProgress(data.message),
+            onArtifact: (data) => appendJobArtifact(data.artifact),
+            onFinished: renderJob,
+        }, () => panel.isConnected);
         pollLocalJob(meta.pendingJob.id, (job) => {
             statusEl.textContent = `状态：${job.status}`;
             logEl.innerHTML = (job.progress || [])
-                .slice(-8)
+                .slice(-24)
                 .map((line) => `<div class="loading-progress-item">${escapeHtml(line)}</div>`)
                 .join("");
             resultEl.innerHTML = buildJobResultHtml(job);

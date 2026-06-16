@@ -772,6 +772,86 @@ async def stream_graph_run(
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+def _job_stream_snapshot(job: dict, *, progress_offset: int, artifact_offset: int) -> tuple[list[dict], int, int, bool]:
+    progress = job.get("progress") if isinstance(job.get("progress"), list) else []
+    artifacts = job.get("artifacts") if isinstance(job.get("artifacts"), list) else []
+    events: list[dict] = []
+
+    if progress_offset == 0 and artifact_offset == 0:
+        events.append({"type": "job_snapshot", "payload": {"job": job}})
+        progress_offset = len(progress)
+        artifact_offset = len(artifacts)
+
+    for index, message in enumerate(progress[progress_offset:], start=progress_offset):
+        events.append(
+            {
+                "type": "job_progress",
+                "payload": {
+                    "job_id": job.get("id", ""),
+                    "index": index,
+                    "message": str(message or ""),
+                    "status": job.get("status", ""),
+                    "updated_at": job.get("updated_at", ""),
+                },
+            }
+        )
+
+    for index, artifact in enumerate(artifacts[artifact_offset:], start=artifact_offset):
+        events.append(
+            {
+                "type": "job_artifact",
+                "payload": {
+                    "job_id": job.get("id", ""),
+                    "index": index,
+                    "artifact": artifact if isinstance(artifact, dict) else {},
+                    "status": job.get("status", ""),
+                    "updated_at": job.get("updated_at", ""),
+                },
+            }
+        )
+
+    status = str(job.get("status") or "running")
+    completed = status in {"completed", "failed", "cancelled"}
+    if completed:
+        events.append({"type": "job_finished", "payload": {"job": job}})
+
+    return events, len(progress), len(artifacts), completed
+
+
+async def stream_local_job(job_id: str):
+    progress_offset = 0
+    artifact_offset = 0
+    last_heartbeat = asyncio.get_running_loop().time()
+
+    async def event_generator():
+        nonlocal progress_offset, artifact_offset, last_heartbeat
+        while True:
+            job = await asyncio.to_thread(local_job_store.get, job_id)
+            if not job:
+                yield build_sse_event("job_missing", {"job_id": job_id})
+                break
+
+            events, progress_offset, artifact_offset, completed = _job_stream_snapshot(
+                job,
+                progress_offset=progress_offset,
+                artifact_offset=artifact_offset,
+            )
+            for event in events:
+                yield build_sse_event(event["type"], event["payload"])
+
+            if completed:
+                break
+
+            now = asyncio.get_running_loop().time()
+            if now - last_heartbeat >= 15:
+                last_heartbeat = now
+                yield build_sse_event("job_heartbeat", {"job_id": job_id, "status": job.get("status", "running")})
+
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_auth_db()
@@ -1108,6 +1188,17 @@ async def job_status(job_id: str, request: Request):
     if job["user_id"] and int(job["user_id"]) != int(current_user["id"]):
         raise HTTPException(status_code=403, detail="You cannot access this job.")
     return serialize_job_payload(job)
+
+
+@app.get("/api/jobs/{job_id}/stream")
+async def job_stream(job_id: str, request: Request):
+    current_user = require_authenticated_user(request)
+    job = local_job_store.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job["user_id"] and int(job["user_id"]) != int(current_user["id"]):
+        raise HTTPException(status_code=403, detail="You cannot access this job.")
+    return await stream_local_job(job_id)
 
 
 @app.post("/api/jobs/{job_id}/cancel")
