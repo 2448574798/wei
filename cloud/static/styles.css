@@ -702,6 +702,52 @@
             background: rgba(20, 27, 36, 0.78);
         }
 
+        .interactive-panel[data-state="submitting"] {
+            border-color: rgba(37, 99, 235, 0.34);
+            box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.12);
+        }
+
+        .interactive-panel[data-state="approved"] {
+            border-color: rgba(22, 163, 74, 0.36);
+            background: rgba(240, 253, 244, 0.72);
+        }
+
+        .interactive-panel[data-state="rejected"],
+        .interactive-panel[data-state="error"] {
+            border-color: rgba(220, 38, 38, 0.28);
+            background: rgba(254, 242, 242, 0.7);
+        }
+
+        [data-theme="dark"] .interactive-panel[data-state="approved"] {
+            background: rgba(20, 83, 45, 0.22);
+        }
+
+        [data-theme="dark"] .interactive-panel[data-state="rejected"],
+        [data-theme="dark"] .interactive-panel[data-state="error"] {
+            background: rgba(127, 29, 29, 0.22);
+        }
+
+        .confirmation-state {
+            border-radius: 999px;
+            align-self: flex-start;
+            padding: 5px 9px;
+            background: rgba(37, 99, 235, 0.1);
+            color: var(--primary-strong);
+            font-size: 12px;
+            line-height: 1.35;
+        }
+
+        .interactive-panel[data-state="approved"] .confirmation-state {
+            background: rgba(22, 163, 74, 0.12);
+            color: var(--success);
+        }
+
+        .interactive-panel[data-state="rejected"] .confirmation-state,
+        .interactive-panel[data-state="error"] .confirmation-state {
+            background: rgba(220, 38, 38, 0.1);
+            color: var(--danger);
+        }
+
         .interactive-title {
             font-size: 13px;
             font-weight: 700;
@@ -737,6 +783,15 @@
             display: flex;
             gap: 8px;
             flex-wrap: wrap;
+        }
+
+        .interactive-actions button:disabled {
+            opacity: 0.68;
+            cursor: not-allowed;
+        }
+
+        .interactive-actions button.is-confirmed {
+            box-shadow: none;
         }
 
         .interactive-log {

@@ -743,6 +743,7 @@ function appendInteractivePanel(wrapper, meta) {
     if (meta.awaitingConfirmation) {
         const panel = document.createElement("div");
         panel.className = "interactive-panel";
+        panel.dataset.confirmationPanel = "true";
         panel.innerHTML = `
             <div class="interactive-title">等待你的确认</div>
             <div class="interactive-copy">${escapeHtml(meta.awaitingConfirmation.question || "")}</div>
@@ -863,8 +864,67 @@ function loadState() {
     updateLocalExecButton();
 }
 
+function setConfirmationPanelState(panel, state, message = "") {
+    if (!panel) return;
+    panel.dataset.state = state;
+    const buttons = Array.from(panel.querySelectorAll("button"));
+    const input = panel.querySelector(".interactive-input");
+    let stateEl = panel.querySelector(".confirmation-state");
+    if (!stateEl) {
+        stateEl = document.createElement("div");
+        stateEl.className = "confirmation-state";
+        const actions = panel.querySelector(".interactive-actions");
+        if (actions) {
+            actions.before(stateEl);
+        } else {
+            panel.appendChild(stateEl);
+        }
+    }
+
+    if (state === "submitting") {
+        buttons.forEach((button) => {
+            button.disabled = true;
+            button.dataset.originalText = button.dataset.originalText || button.textContent;
+            if (button.dataset.action === panel.dataset.decision) {
+                button.textContent = panel.dataset.decision === "approve" ? "继续中..." : "拒绝中...";
+            }
+        });
+        if (input) input.disabled = true;
+        stateEl.textContent = message || "正在提交确认...";
+        return;
+    }
+
+    if (state === "approved" || state === "rejected") {
+        buttons.forEach((button) => {
+            button.disabled = true;
+            button.classList.add("is-confirmed");
+            if (button.dataset.action === "approve") {
+                button.textContent = state === "approved" ? "已确认" : (button.dataset.originalText || button.textContent);
+            }
+            if (button.dataset.action === "reject") {
+                button.textContent = state === "rejected" ? "已拒绝" : (button.dataset.originalText || button.textContent);
+            }
+        });
+        if (input) input.disabled = true;
+        stateEl.textContent = message || (state === "approved" ? "已确认，正在继续执行..." : "已拒绝，正在停止...");
+        return;
+    }
+
+    if (state === "error") {
+        buttons.forEach((button) => {
+            button.disabled = false;
+            if (button.dataset.originalText) button.textContent = button.dataset.originalText;
+        });
+        if (input) input.disabled = false;
+        stateEl.textContent = message || "确认提交失败，请重试。";
+    }
+}
+
 async function submitConfirmation(confirmation, approved, responseText, wrapper) {
     if (!confirmation?.id || !confirmation?.thread_id) return;
+    const confirmationPanel = wrapper?.querySelector(".interactive-panel[data-confirmation-panel='true']");
+    if (confirmationPanel) confirmationPanel.dataset.decision = approved ? "approve" : "reject";
+    setConfirmationPanelState(confirmationPanel, "submitting", approved ? "已确认，正在继续任务..." : "已拒绝，正在更新任务...");
     const loadingEl = addLoadingMessage(approved ? "正在继续执行" : "正在处理中");
     appendLoadingProgress(loadingEl, approved ? "已确认继续，正在恢复任务。" : "已拒绝继续，正在整理结果。");
     setStatus(approved ? "正在继续执行..." : "正在处理中...", "ok");
@@ -920,8 +980,7 @@ async function submitConfirmation(confirmation, approved, responseText, wrapper)
 
         loadingEl.remove();
         if (wrapper) {
-            const panel = wrapper.querySelector(".interactive-panel");
-            if (panel) panel.remove();
+            setConfirmationPanelState(confirmationPanel, approved ? "approved" : "rejected");
         }
         if (finalPayload) {
             addMessage("assistant", finalPayload.reply || "已处理完成。", {
@@ -931,6 +990,7 @@ async function submitConfirmation(confirmation, approved, responseText, wrapper)
         }
     } catch (error) {
         loadingEl.remove();
+        setConfirmationPanelState(confirmationPanel, "error", `失败：${error.message}`);
         addMessage("assistant", `确认后执行失败：${error.message}`);
         setStatus(`确认后执行失败：${error.message}`, "error");
     }
