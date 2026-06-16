@@ -2,10 +2,11 @@ import asyncio
 import json
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
@@ -113,6 +114,9 @@ from src.web_helpers import (
     require_authenticated_user,
     serialize_user,
 )
+
+
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
 class AgentState(MessagesState):
@@ -799,6 +803,48 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def static_file_response(filename: str, media_type: str | None = None) -> FileResponse:
+    path = STATIC_DIR / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"Static file not found: {filename}")
+    return FileResponse(path, media_type=media_type)
+
+
+@app.get("/", include_in_schema=False)
+async def serve_index():
+    return static_file_response("index.html", "text/html")
+
+
+@app.get("/index.html", include_in_schema=False)
+async def serve_index_html():
+    return static_file_response("index.html", "text/html")
+
+
+@app.get("/login", include_in_schema=False)
+async def serve_login():
+    return static_file_response("login.html", "text/html")
+
+
+@app.get("/login.html", include_in_schema=False)
+async def serve_login_html():
+    return static_file_response("login.html", "text/html")
+
+
+@app.get("/app.js", include_in_schema=False)
+async def serve_app_js():
+    return static_file_response("app.js", "application/javascript")
+
+
+@app.get("/styles.css", include_in_schema=False)
+async def serve_styles_css():
+    return static_file_response("styles.css", "text/css")
+
+
+@app.get("/favicon.svg", include_in_schema=False)
+async def serve_favicon_svg():
+    return static_file_response("favicon.svg", "image/svg+xml")
 
 
 @app.get("/health")
