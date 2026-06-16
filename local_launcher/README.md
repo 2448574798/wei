@@ -1,16 +1,8 @@
-# Local Launcher
+# Local Thin Browser Worker
 
-`local_launcher/.env` is the only local runtime env entry now.
+`local_launcher/.env` is the local runtime env entry.
 
-## What runs locally
-
-- `frpc`
-- `Open Interpreter`
-- `Local Thin Browser Worker` inside `browser_bridge.py`
-- `Playwright MCP Server` managed by the local worker
-- Local Chrome/Edge profile reused by Playwright MCP
-
-Browser execution is now shaped as:
+## Runtime Shape
 
 ```text
 Cloud Wei Agent
@@ -21,29 +13,16 @@ Cloud Wei Agent
   -> Local Edge / Chrome
 ```
 
-The local HTTP Browser Bridge endpoints are kept for local troubleshooting and older launchers. In normal cloud mode, the cloud server should use the worker WebSocket path.
+The local launcher no longer starts a local Open Interpreter HTTP service or a local HTTP browser bridge. Browser automation is driven through the worker websocket connection to the cloud server.
+Vision planning, verification, and retry policy are cloud-side responsibilities. The local worker only captures screenshots, executes browser actions, and reports results over the websocket.
 
-## Directory
+## What Runs Locally
 
-```text
-local_launcher/
-|-- .env
-|-- .env.example
-|-- README.md
-|-- browser_bridge.py
-|-- build_launcher.ps1
-|-- launcher_config.example.json
-|-- launcher_config.json
-|-- local_launcher.py
-|-- open_douyin_edge.bat
-|-- start_local_services.bat
-|-- start_redis_tunnel.bat
-`-- launcher_logs/
-```
+- `local_thin_browser_worker` from `browser_bridge.py`
+- `Playwright MCP Server` managed by the local worker
+- Local Edge/Chrome profile reused by Playwright MCP
 
-## Start local services
-
-Run:
+## Start
 
 ```bat
 local_launcher\start_local_services.bat
@@ -54,25 +33,9 @@ It reads:
 - `local_launcher\launcher_config.json`
 - `local_launcher\.env`
 
-It starts:
+If `WEI_REDIS_TUNNEL_ENABLED` is not `false`, it also starts the Redis SSH tunnel used by local long-task code. This logic is built into `start_local_services.bat`; it is not an inbound browser tunnel and does not expose local services to the cloud.
 
-- `frpc`
-- `Open Interpreter`
-- `Local Thin Browser Worker / Browser Bridge`
-
-## Open Douyin
-
-Run:
-
-```bat
-local_launcher\open_douyin_edge.bat
-```
-
-This script no longer launches a separate Playwright runner. It reuses the running local browser worker process and calls the local `POST /mcp/navigate` troubleshooting endpoint.
-
-## Local env example
-
-Create the file first:
+## Local Env Example
 
 ```powershell
 Copy-Item local_launcher\.env.example local_launcher\.env
@@ -81,85 +44,45 @@ Copy-Item local_launcher\.env.example local_launcher\.env
 Common variables:
 
 ```env
-OPEN_INTERPRETER_URL=http://127.0.0.1:18000
-OPEN_INTERPRETER_AUTH_KEY=dummy-api-key
-OPEN_INTERPRETER_TIMEOUT=90
-
-PLAYWRIGHT_PYTHON_EXE=D:\Download\oi-env-310\Scripts\python.exe
+PLAYWRIGHT_PYTHON_EXE=C:\Path\To\Python\python.exe
 PLAYWRIGHT_DEFAULT_URL=https://www.douyin.com/
-PLAYWRIGHT_USER_DATA_DIR=D:\Download\playwright-user-data\edge-douyin-worker
-
-BROWSER_BRIDGE_HOST=127.0.0.1
-BROWSER_BRIDGE_PORT=18100
-BROWSER_BRIDGE_TOKEN=replace-with-local-browser-bridge-token
+PLAYWRIGHT_USER_DATA_DIR=C:\Users\YourName\AppData\Local\WeiAgent\playwright-user-data\edge-worker
 
 BROWSER_WORKER_ENABLED=true
 BROWSER_WORKER_ID=default
 BROWSER_WORKER_TOKEN=replace-with-browser-worker-token
 BROWSER_WORKER_WS_URL=wss://sunw.chat/ws/browser-worker
+BROWSER_SCREENSHOT_OPTIMIZE=true
+BROWSER_SCREENSHOT_MAX_WIDTH=1280
+BROWSER_SCREENSHOT_JPEG_QUALITY=72
+BROWSER_DIAGNOSTICS_ENABLED=false
 
 WEI_REDIS_TUNNEL_ENABLED=true
 WEI_REDIS_SSH_USER=ubuntu
-WEI_REDIS_SSH_HOST=43.134.7.123
+WEI_REDIS_SSH_HOST=your-cloud-host.example.com
 WEI_REDIS_LOCAL_PORT=6380
 WEI_REDIS_REMOTE_PORT=6379
 
 PLAYWRIGHT_MCP_ENABLED=true
 PLAYWRIGHT_MCP_COMMAND=C:\Program Files\nodejs\npx.cmd
-PLAYWRIGHT_MCP_ARGS_JSON=["@playwright/mcp@latest","--browser=msedge","--user-data-dir=D:\\Download\\playwright-user-data\\edge-douyin-worker"]
+PLAYWRIGHT_MCP_ARGS_JSON=["@playwright/mcp@latest","--browser=msedge","--user-data-dir=C:\\Users\\YourName\\AppData\\Local\\WeiAgent\\playwright-user-data\\edge-worker"]
 PLAYWRIGHT_MCP_PROTOCOL_VERSION=2025-11-25
 PLAYWRIGHT_MCP_STARTUP_TIMEOUT=30
 PLAYWRIGHT_MCP_REQUEST_TIMEOUT=120
 ```
 
-## Local Browser Worker API
+## Cloud-Side Checks
 
-Available endpoints:
+- `GET /health` includes `browser_worker_connected`, `browser_execution_ready`, and `browser_workers`.
+- `GET /api/browser-workers` returns connected workers for authenticated troubleshooting.
 
-- `GET /health`
-- `GET /mcp/status`
-- `GET /mcp/tools`
-- `GET /mcp/tabs`
-- `POST /mcp/restart`
-- `POST /mcp/navigate`
-- `POST /mcp/snapshot`
-- `POST /mcp/interact`
-- `POST /jobs/start`
-- `GET /jobs/{id}`
-- `POST /jobs/{id}/cancel`
+`browser_execution_ready=true` means the cloud server has a live worker websocket connection.
 
-Cloud-side orchestration:
+Cloud-only browser vision variables such as `BROWSER_VISION_MODEL` and
+`BROWSER_VISION_VERIFY_ENABLED` belong in the cloud server environment, not in
+`local_launcher/.env`.
 
-- Agent tools call the cloud browser orchestrator in `src/browser_orchestrator.py`
-- When `BROWSER_WORKER_ENABLED=true`, browser commands are sent over `/ws/browser-worker`
-- The legacy HTTP Browser Bridge fallback is used only when worker mode is disabled
-
-Cloud-side visibility:
-
-- Server `GET /health` now includes `browser_worker_connected`, `browser_execution_ready`, and `browser_workers`
-- Server `GET /api/browser-workers` returns the connected worker list for authenticated troubleshooting
-
-When `BROWSER_WORKER_ENABLED=true` and `BROWSER_WORKER_WS_URL` is set, the same local process also behaves as a thin browser worker:
-
-- It keeps a long-lived websocket connection to the cloud endpoint
-- It preserves local browser profile ownership on the local machine
-- It exposes `browser.tabs`, `browser.navigate`, `browser.snapshot`, and `browser.interact` over that websocket channel
-
-`/mcp/interact` is now MCP-only and supports readonly steps only:
-
-- `wait`
-- `goto`
-- `click`
-- `click_any`
-- `press`
-- `extract_text`
-- `extract_any_text`
-- `extract_list_text`
-- `snapshot`
-
-## Build launcher
-
-Run:
+## Build Launcher
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\local_launcher\build_launcher.ps1
@@ -172,8 +95,6 @@ local_launcher/dist/LocalRuntimeLauncher.exe
 ```
 
 ## Logs
-
-Local launcher logs:
 
 ```text
 local_launcher/launcher_logs/

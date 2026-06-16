@@ -22,7 +22,6 @@ from src.auth_store import (
     init_auth_db,
     verify_password,
 )
-from src.browser_orchestrator import browser_bridge_is_configured
 from src.browser_worker_hub import browser_worker_hub
 from src.chat_helpers import (
     append_tool_trace,
@@ -62,11 +61,21 @@ from src.runtime_config import (
     BROWSER_WORKER_ENABLED,
     BROWSER_WORKER_DEFAULT_ID,
     BROWSER_WORKER_TOKEN,
+    BROWSER_VISION_ACTION_MIN_CONFIDENCE,
+    BROWSER_VISION_MODEL,
+    BROWSER_VISION_VERIFY_MAX_RETRIES,
+    BROWSER_VISION_VERIFY_MIN_CONFIDENCE,
+    BROWSER_VISION_VERIFY_ENABLED,
+    BROWSER_VISUAL_CLICK_PREFLIGHT_ENABLED,
+    BROWSER_VISUAL_CLICK_PREFLIGHT_MIN_SCORE,
+    BROWSER_VISUAL_TRACE_MAX_IMAGE_CHARS,
+    BROWSER_VISUAL_TRACE_SCREENSHOTS,
     DISPATCHER_MODEL,
     EXECUTION_MODEL_ADVANCED,
     EXECUTION_MODEL_SIMPLE,
     EXECUTION_MODEL_STANDARD,
     LOCAL_EXECUTION_MODEL,
+    LOCAL_JOB_ARTIFACT_LIMIT,
     ONE_API_TOKEN,
     ONE_API_URL,
     ONLINE_RESEARCH_MODEL,
@@ -79,16 +88,16 @@ from src.runtime_config import (
 from src.tools import (
     ask_open_interpreter,
     decode_meta_payload,
-    interact_local_webpage,
     inspect_local_webpage,
     list_local_browser_tabs,
     online_research,
     open_local_browser_page,
+    operate_local_browser_visual,
     open_interpreter_is_configured,
     request_human_confirmation,
     send_email,
     smtp_is_configured,
-    start_local_comment_hunt,
+    start_local_browser_visual_job,
     start_local_webpage_monitor,
     start_open_interpreter_job,
 )
@@ -150,8 +159,8 @@ def get_allowed_tools(decision: dict | None, local_execution: bool) -> list:
             list_local_browser_tabs,
             open_local_browser_page,
             inspect_local_webpage,
-            interact_local_webpage,
-            start_local_comment_hunt,
+            operate_local_browser_visual,
+            start_local_browser_visual_job,
             start_local_webpage_monitor,
             request_human_confirmation,
         ]
@@ -171,8 +180,8 @@ def get_allowed_tools(decision: dict | None, local_execution: bool) -> list:
             list_local_browser_tabs,
             open_local_browser_page,
             inspect_local_webpage,
-            interact_local_webpage,
-            start_local_comment_hunt,
+            operate_local_browser_visual,
+            start_local_browser_visual_job,
             start_local_webpage_monitor,
             request_human_confirmation,
         ]
@@ -433,9 +442,9 @@ async def agent_node(state: AgentState, config=None):
         "- Use list_local_browser_tabs to inspect existing local browser tabs before choosing a site-specific tab.\n"
         "- Use open_local_browser_page when the main task is simply to open a webpage in the configured local browser.\n"
         "- Use inspect_local_webpage when you need a local logged-in webpage snapshot before deciding next actions.\n"
-        "- Use interact_local_webpage for local webpage tasks that require clicks, waits, or extracting specific page text after interaction.\n"
-        "- For interact_local_webpage, pass steps_json as a JSON array. Prefer step types click_any, extract_any_text, wait, and snapshot for fragile consumer webpages.\n"
-        "- Use start_local_comment_hunt for longer read-only comment巡检 tasks such as paging through local content and searching visible comments for a keyword.\n"
+        "- Use operate_local_browser_visual for visually complex local browser pages, canvas/video-heavy pages, uncertain selectors, or when screenshot recognition is needed.\n"
+        "- Use start_local_browser_visual_job for longer or uncertain visual browser tasks so progress can be observed and cancelled.\n"
+        "- For browser recognition, use the returned Page diagnostics and Visible controls candidates before choosing selectors or click targets.\n"
         "- Use start_local_webpage_monitor for longer local webpage observation tasks such as watching for specific visible text.\n"
         "- Pass runnable code directly to ask_open_interpreter, not natural-language instructions.\n"
         "- For side-effect actions such as opening apps, opening a browser, writing files, or launching programs, make the code print a short Chinese success message after the action completes.\n"
@@ -449,7 +458,7 @@ async def agent_node(state: AgentState, config=None):
             "\n\nLocal execution policy:\n"
             "- The user is asking to operate their local computer or run local code.\n"
             "- Prefer dedicated local tools before falling back to ask_open_interpreter.\n"
-            "- For webpage tasks on the local machine, prefer list_local_browser_tabs, open_local_browser_page, inspect_local_webpage, interact_local_webpage, start_local_comment_hunt, or start_local_webpage_monitor before falling back to generic code execution.\n"
+            "- For webpage tasks on the local machine, prefer list_local_browser_tabs, open_local_browser_page, inspect_local_webpage, operate_local_browser_visual, start_local_browser_visual_job, or start_local_webpage_monitor before falling back to generic code execution.\n"
             "- If you call ask_open_interpreter, provide complete runnable code.\n"
             "- When opening local apps, browsers, files, or performing side effects, include a final print statement in Chinese describing what succeeded.\n"
             "- Prefer concise, reliable code over fancy code."
@@ -676,14 +685,22 @@ def build_health_payload() -> dict:
         "execution_model_standard": EXECUTION_MODEL_STANDARD,
         "execution_model_advanced": EXECUTION_MODEL_ADVANCED,
         "local_execution_model": LOCAL_EXECUTION_MODEL,
+        "browser_vision_model": BROWSER_VISION_MODEL,
+        "browser_vision_verify_enabled": BROWSER_VISION_VERIFY_ENABLED,
+        "browser_vision_action_min_confidence": BROWSER_VISION_ACTION_MIN_CONFIDENCE,
+        "browser_vision_verify_min_confidence": BROWSER_VISION_VERIFY_MIN_CONFIDENCE,
+        "browser_vision_verify_max_retries": BROWSER_VISION_VERIFY_MAX_RETRIES,
+        "browser_visual_click_preflight_enabled": BROWSER_VISUAL_CLICK_PREFLIGHT_ENABLED,
+        "browser_visual_click_preflight_min_score": BROWSER_VISUAL_CLICK_PREFLIGHT_MIN_SCORE,
+        "browser_visual_trace_screenshots": BROWSER_VISUAL_TRACE_SCREENSHOTS,
+        "browser_visual_trace_max_image_chars": BROWSER_VISUAL_TRACE_MAX_IMAGE_CHARS,
+        "local_job_artifact_limit": LOCAL_JOB_ARTIFACT_LIMIT,
         "online_research_model": ONLINE_RESEARCH_MODEL,
         "smtp_configured": smtp_is_configured(),
         "open_interpreter_configured": open_interpreter_is_configured(),
-        "browser_bridge_configured": browser_bridge_is_configured(),
         "browser_orchestrator": {
             "name": "cloud_browser_orchestrator",
             "preferred_transport": "websocket",
-            "legacy_bridge_fallback": not BROWSER_WORKER_ENABLED,
         },
         "browser_worker_enabled": BROWSER_WORKER_ENABLED,
         "browser_worker_default_id": BROWSER_WORKER_DEFAULT_ID,
@@ -794,11 +811,7 @@ async def health():
         for item in workers
         if isinstance(item, dict)
     )
-    payload["browser_execution_ready"] = (
-        payload["browser_worker_connected"]
-        if BROWSER_WORKER_ENABLED
-        else payload["browser_bridge_configured"]
-    )
+    payload["browser_execution_ready"] = BROWSER_WORKER_ENABLED and payload["browser_worker_connected"]
     return payload
 
 

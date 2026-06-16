@@ -30,6 +30,22 @@ def get_path_from_env(name: str, default: Path) -> Path:
     return Path(value) if value else default
 
 
+def get_float_from_env(name: str, default: float, *, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except Exception:
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def get_int_from_env(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except Exception:
+        value = default
+    return max(minimum, min(value, maximum))
+
+
 def configure_logger() -> logging.Logger:
     logger = logging.getLogger("wei_agent")
     if logger.handlers:
@@ -67,7 +83,6 @@ def load_system_prompt() -> str:
 
 
 load_dotenv(BASE_DIR / ".env")
-load_dotenv(BASE_DIR / "local_launcher" / ".env")
 logger = configure_logger()
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
@@ -82,6 +97,16 @@ EXECUTION_MODEL_ADVANCED = os.getenv("EXECUTION_MODEL_ADVANCED", "gpt-5.4")
 LOCAL_EXECUTION_MODEL = os.getenv("LOCAL_EXECUTION_MODEL", EXECUTION_MODEL_ADVANCED)
 ONLINE_RESEARCH_MODEL = os.getenv("ONLINE_RESEARCH_MODEL", "gpt-4o-mini-search-preview")
 ONLINE_RESEARCH_MAX_TOKENS = int(os.getenv("ONLINE_RESEARCH_MAX_TOKENS", "420"))
+BROWSER_VISION_MODEL = os.getenv("BROWSER_VISION_MODEL", "gpt-4o").strip() or "gpt-4o"
+BROWSER_VISION_VERIFY_ENABLED = os.getenv("BROWSER_VISION_VERIFY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+BROWSER_VISION_ACTION_MIN_CONFIDENCE = get_float_from_env("BROWSER_VISION_ACTION_MIN_CONFIDENCE", 0.55, minimum=0.0, maximum=1.0)
+BROWSER_VISION_VERIFY_MIN_CONFIDENCE = get_float_from_env("BROWSER_VISION_VERIFY_MIN_CONFIDENCE", 0.45, minimum=0.0, maximum=1.0)
+BROWSER_VISION_VERIFY_MAX_RETRIES = get_int_from_env("BROWSER_VISION_VERIFY_MAX_RETRIES", 2, minimum=0, maximum=5)
+BROWSER_VISUAL_CLICK_PREFLIGHT_ENABLED = os.getenv("BROWSER_VISUAL_CLICK_PREFLIGHT_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+BROWSER_VISUAL_CLICK_PREFLIGHT_MIN_SCORE = get_float_from_env("BROWSER_VISUAL_CLICK_PREFLIGHT_MIN_SCORE", 0.16, minimum=0.0, maximum=1.0)
+BROWSER_VISUAL_TRACE_SCREENSHOTS = os.getenv("BROWSER_VISUAL_TRACE_SCREENSHOTS", "false").strip().lower() in {"1", "true", "yes", "on"}
+BROWSER_VISUAL_TRACE_MAX_IMAGE_CHARS = get_int_from_env("BROWSER_VISUAL_TRACE_MAX_IMAGE_CHARS", 1_500_000, minimum=0, maximum=8_000_000)
+LOCAL_JOB_ARTIFACT_LIMIT = get_int_from_env("LOCAL_JOB_ARTIFACT_LIMIT", 80, minimum=0, maximum=300)
 AUTH_COOKIE_NAME = os.getenv("AUTH_COOKIE_NAME", "wei_session")
 AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "false").strip().lower() == "true"
 BROWSER_WORKER_ENABLED = os.getenv("BROWSER_WORKER_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}

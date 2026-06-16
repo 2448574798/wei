@@ -123,8 +123,8 @@ function validateLocalExecutionHealth(health) {
     if (health?.browser_worker_enabled && !health?.browser_worker_connected) {
         throw new Error("本地浏览器 Worker 未连接。请先启动 local_launcher\\start_local_services.bat，并确认本机已连上云端 /ws/browser-worker。");
     }
-    if (!health?.browser_worker_enabled && !health?.browser_bridge_configured) {
-        throw new Error("本地浏览器执行未配置。请配置 Browser Bridge 或启用 Browser Worker。");
+    if (!health?.browser_worker_enabled) {
+        throw new Error("Local browser execution is disabled. Set BROWSER_WORKER_ENABLED=true on the cloud server.");
     }
 }
 
@@ -134,10 +134,7 @@ function runtimeStatusSuffix(health) {
         if (health.browser_worker_enabled) {
             return health.browser_worker_connected ? "本地 Worker 已连接" : "本地 Worker 未连接";
         }
-        if (health.browser_bridge_configured) {
-            return "本地 Browser Bridge 已配置";
-        }
-        return "本地执行未配置";
+        return "Browser Worker disabled";
     }
     if (health.browser_worker_enabled) {
         return health.browser_worker_connected ? "Worker 在线" : "Worker 离线";
@@ -574,6 +571,99 @@ function buildJobBackendLabel(payload) {
     return backend || "";
 }
 
+function summarizeVisualArtifact(item) {
+    const event = String(item?.event || "artifact").trim();
+    if (event === "vision_decision") {
+        const actions = Array.isArray(item.actions) ? item.actions : [];
+        const action = actions[0] || {};
+        return [
+            item.status ? `status=${item.status}` : "",
+            item.summary ? `summary=${item.summary}` : "",
+            action.action ? `action=${action.action}` : "",
+            action.target_description ? `target=${action.target_description}` : "",
+            action.confidence !== undefined ? `confidence=${action.confidence}` : "",
+        ].filter(Boolean).join("; ");
+    }
+    if (event === "action_result") {
+        const action = item.action || {};
+        return [
+            action.action ? `action=${action.action}` : "",
+            action.target_description ? `target=${action.target_description}` : "",
+            item.result?.ok !== undefined ? `ok=${Boolean(item.result.ok)}` : "",
+            item.trace || "",
+        ].filter(Boolean).join("; ");
+    }
+    if (event === "click_preflight") {
+        return [
+            item.score !== undefined ? `score=${Number(item.score).toFixed(2)}` : "",
+            item.issue ? `issue=${item.issue}` : "",
+            item.summary || "",
+        ].filter(Boolean).join("; ");
+    }
+    if (event === "click_preflight_failed") {
+        return item.error ? `error=${item.error}` : "click preflight unavailable";
+    }
+    if (event === "verification") {
+        const verification = item.verification || {};
+        return [
+            verification.status ? `status=${verification.status}` : "",
+            verification.matched_expected_change !== undefined ? `matched=${Boolean(verification.matched_expected_change)}` : "",
+            verification.misclick !== undefined ? `misclick=${Boolean(verification.misclick)}` : "",
+            verification.risk ? `risk=${verification.risk}` : "",
+            verification.summary ? `summary=${verification.summary}` : "",
+        ].filter(Boolean).join("; ");
+    }
+    if (event === "verification_policy") {
+        return [item.status ? `status=${item.status}` : "", item.reason || ""].filter(Boolean).join("; ");
+    }
+    if (event === "final") {
+        return [item.status ? `status=${item.status}` : "", item.summary || ""].filter(Boolean).join("; ");
+    }
+    if (item.screenshot) {
+        return [
+            item.screenshot.title ? `title=${item.screenshot.title}` : "",
+            item.screenshot.url ? `url=${item.screenshot.url}` : "",
+            item.screenshot.image_base64_length ? `image=${item.screenshot.image_base64_length} chars` : "",
+            item.screenshot.image_omitted_reason || "",
+        ].filter(Boolean).join("; ");
+    }
+    return item.trace || "";
+}
+
+function buildVisualArtifactsHtml(job) {
+    const artifacts = Array.isArray(job?.artifacts) ? job.artifacts : [];
+    const visualArtifacts = artifacts.filter((item) => item && typeof item === "object");
+    if (!visualArtifacts.length) return "";
+
+    const rows = visualArtifacts.slice(-12).map((item) => {
+        const screenshot = item.screenshot || {};
+        const image = screenshot.image_base64
+            ? `<img class="job-artifact-image" alt="browser screenshot" src="data:${escapeHtml(screenshot.mime_type || "image/png")};base64,${screenshot.image_base64}">`
+            : "";
+        const diagnostics = Array.isArray(screenshot.diagnostics) && screenshot.diagnostics.length
+            ? `<div class="job-artifact-diagnostics">${escapeHtml(screenshot.diagnostics.slice(0, 4).join("\n"))}</div>`
+            : "";
+        return `
+            <div class="job-artifact">
+                <div class="job-artifact-head">
+                    <span>Round ${escapeHtml(item.round ?? "-")}</span>
+                    <span>${escapeHtml(item.event || "artifact")}</span>
+                </div>
+                ${image}
+                <div class="job-artifact-summary">${escapeHtml(summarizeVisualArtifact(item) || "-")}</div>
+                ${diagnostics}
+            </div>
+        `;
+    }).join("");
+
+    return `
+        <div class="job-detail-block">
+            <div class="job-detail-label">Visual Trace</div>
+            <div class="job-artifacts">${rows}</div>
+        </div>
+    `;
+}
+
 function buildJobResultHtml(job) {
     const payload = getJobResultPayload(job);
     const blocks = [];
@@ -600,6 +690,10 @@ function buildJobResultHtml(job) {
     }
     if (job?.error) {
         blocks.push(`<div class="job-detail-block job-detail-error"><div class="job-detail-label">Error</div><div class="job-detail-text">${escapeHtml(job.error)}</div></div>`);
+    }
+    const visualArtifacts = buildVisualArtifactsHtml(job);
+    if (visualArtifacts) {
+        blocks.push(visualArtifacts);
     }
     return blocks.join("");
 }

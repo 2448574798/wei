@@ -25,6 +25,7 @@ searxng-data/
 .playwright-mcp/
 data/
 local_launcher/.env
+local_launcher/launcher_config.json
 local_launcher/runtime_env.local
 
 # editor / os

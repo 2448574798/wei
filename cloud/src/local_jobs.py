@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Thread
@@ -7,7 +8,7 @@ from uuid import uuid4
 
 from redis import Redis
 
-from src.runtime_config import REDIS_URL
+from src.runtime_config import LOCAL_JOB_ARTIFACT_LIMIT, REDIS_URL
 
 
 JOB_TTL_SECONDS = 7 * 24 * 60 * 60
@@ -36,6 +37,7 @@ class LocalJob:
     updated_at: str = field(default_factory=utcnow_iso)
     status: str = "running"
     progress: list[str] = field(default_factory=list)
+    artifacts: list[dict] = field(default_factory=list)
     result: str = ""
     error: str = ""
     cancel_requested: bool = False
@@ -51,6 +53,7 @@ class LocalJob:
             "updated_at": self.updated_at,
             "status": self.status,
             "progress": list(self.progress),
+            "artifacts": list(self.artifacts),
             "result": self.result,
             "error": self.error,
             "cancel_requested": self.cancel_requested,
@@ -67,6 +70,9 @@ class LocalJobStore:
     def _progress_key(self, job_id: str) -> str:
         return f"wei:job:{job_id}:progress"
 
+    def _artifacts_key(self, job_id: str) -> str:
+        return f"wei:job:{job_id}:artifacts"
+
     def create(self, *, title: str, thread_id: str, user_id: int | None, username: str) -> dict:
         job = LocalJob(
             id=str(uuid4()),
@@ -77,6 +83,7 @@ class LocalJobStore:
         )
         meta_key = self._meta_key(job.id)
         progress_key = self._progress_key(job.id)
+        artifacts_key = self._artifacts_key(job.id)
         with self._redis.pipeline() as pipe:
             pipe.hset(
                 meta_key,
@@ -95,10 +102,23 @@ class LocalJobStore:
                 },
             )
             pipe.delete(progress_key)
+            pipe.delete(artifacts_key)
             pipe.expire(meta_key, JOB_TTL_SECONDS)
             pipe.expire(progress_key, JOB_TTL_SECONDS)
+            pipe.expire(artifacts_key, JOB_TTL_SECONDS)
             pipe.execute()
         return job.to_dict()
+
+    def _load_artifacts(self, job_id: str) -> list[dict]:
+        artifacts: list[dict] = []
+        for raw in self._redis.lrange(self._artifacts_key(job_id), 0, -1):
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                continue
+            if isinstance(parsed, dict):
+                artifacts.append(parsed)
+        return artifacts
 
     def get(self, job_id: str) -> dict | None:
         meta = self._redis.hgetall(self._meta_key(job_id))
@@ -115,6 +135,7 @@ class LocalJobStore:
             "updated_at": meta.get("updated_at", ""),
             "status": meta.get("status", "running"),
             "progress": self._redis.lrange(self._progress_key(job_id), 0, -1),
+            "artifacts": self._load_artifacts(job_id),
             "result": meta.get("result", ""),
             "error": meta.get("error", ""),
             "cancel_requested": _to_bool(meta.get("cancel_requested")),
@@ -130,6 +151,24 @@ class LocalJobStore:
             pipe.hset(self._meta_key(job_id), mapping={"updated_at": updated_at})
             pipe.expire(self._meta_key(job_id), JOB_TTL_SECONDS)
             pipe.expire(self._progress_key(job_id), JOB_TTL_SECONDS)
+            pipe.expire(self._artifacts_key(job_id), JOB_TTL_SECONDS)
+            pipe.execute()
+
+    def append_artifact(self, job_id: str, payload: dict) -> None:
+        if not isinstance(payload, dict) or LOCAL_JOB_ARTIFACT_LIMIT <= 0:
+            return
+        artifact = dict(payload)
+        artifact.setdefault("created_at", utcnow_iso())
+        artifact_text = json.dumps(artifact, ensure_ascii=False, separators=(",", ":"))
+        updated_at = utcnow_iso()
+        artifacts_key = self._artifacts_key(job_id)
+        with self._redis.pipeline() as pipe:
+            pipe.rpush(artifacts_key, artifact_text)
+            pipe.ltrim(artifacts_key, -LOCAL_JOB_ARTIFACT_LIMIT, -1)
+            pipe.hset(self._meta_key(job_id), mapping={"updated_at": updated_at})
+            pipe.expire(self._meta_key(job_id), JOB_TTL_SECONDS)
+            pipe.expire(self._progress_key(job_id), JOB_TTL_SECONDS)
+            pipe.expire(artifacts_key, JOB_TTL_SECONDS)
             pipe.execute()
 
     def finish(self, job_id: str, result: str) -> None:
@@ -144,6 +183,7 @@ class LocalJobStore:
             )
             pipe.expire(self._meta_key(job_id), JOB_TTL_SECONDS)
             pipe.expire(self._progress_key(job_id), JOB_TTL_SECONDS)
+            pipe.expire(self._artifacts_key(job_id), JOB_TTL_SECONDS)
             pipe.execute()
 
     def fail(self, job_id: str, error: str) -> None:
@@ -158,6 +198,7 @@ class LocalJobStore:
             )
             pipe.expire(self._meta_key(job_id), JOB_TTL_SECONDS)
             pipe.expire(self._progress_key(job_id), JOB_TTL_SECONDS)
+            pipe.expire(self._artifacts_key(job_id), JOB_TTL_SECONDS)
             pipe.execute()
 
     def cancel(self, job_id: str) -> dict | None:
@@ -175,6 +216,7 @@ class LocalJobStore:
             pipe.hset(meta_key, mapping=updates)
             pipe.expire(meta_key, JOB_TTL_SECONDS)
             pipe.expire(self._progress_key(job_id), JOB_TTL_SECONDS)
+            pipe.expire(self._artifacts_key(job_id), JOB_TTL_SECONDS)
             pipe.execute()
         return self.get(job_id)
 

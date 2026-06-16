@@ -29,21 +29,12 @@ class ConfirmationPayload(BaseModel):
 
 
 def serialize_user(user: dict, include_bindings: bool = True) -> dict:
-    payload = {
+    return {
         "id": user["id"],
         "username": user["username"],
         "display_name": user["display_name"],
         "role": user["role"],
     }
-    if include_bindings:
-        payload.update(
-            {
-                "frp_client_name": user.get("frp_client_name", ""),
-                "frp_remote_port": user.get("frp_remote_port"),
-                "open_interpreter_url": user.get("open_interpreter_url", ""),
-            }
-        )
-    return payload
 
 
 async def parse_json_body(request: Request) -> dict:

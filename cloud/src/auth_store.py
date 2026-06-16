@@ -46,9 +46,6 @@ def init_auth_db() -> None:
                 password_hash TEXT NOT NULL,
                 display_name TEXT NOT NULL,
                 role TEXT NOT NULL DEFAULT 'user',
-                frp_client_name TEXT DEFAULT '',
-                frp_remote_port INTEGER,
-                open_interpreter_url TEXT DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -90,7 +87,6 @@ def get_user_by_username(username: str) -> dict[str, Any] | None:
         row = conn.execute(
             """
             SELECT id, username, password_hash, display_name, role,
-                   frp_client_name, frp_remote_port, open_interpreter_url,
                    created_at, updated_at
             FROM users
             WHERE lower(username) = lower(?)
@@ -105,7 +101,6 @@ def get_user_by_id(user_id: int) -> dict[str, Any] | None:
         row = conn.execute(
             """
             SELECT id, username, display_name, role,
-                   frp_client_name, frp_remote_port, open_interpreter_url,
                    created_at, updated_at
             FROM users
             WHERE id = ?
@@ -120,9 +115,6 @@ def create_user(
     password: str,
     display_name: str | None = None,
     role: str = "user",
-    frp_client_name: str = "",
-    frp_remote_port: int | None = None,
-    open_interpreter_url: str = "",
 ) -> int:
     now = utcnow().isoformat()
     display_name = (display_name or username).strip() or username
@@ -132,18 +124,14 @@ def create_user(
             """
             INSERT INTO users (
                 username, password_hash, display_name, role,
-                frp_client_name, frp_remote_port, open_interpreter_url,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 username.strip(),
                 password_hash,
                 display_name,
                 role,
-                frp_client_name.strip(),
-                frp_remote_port,
-                open_interpreter_url.strip(),
                 now,
                 now,
             ),
@@ -208,9 +196,6 @@ def get_session_user(session_id: str) -> dict[str, Any] | None:
                 u.username,
                 u.display_name,
                 u.role,
-                u.frp_client_name,
-                u.frp_remote_port,
-                u.open_interpreter_url,
                 s.expires_at
             FROM sessions s
             JOIN users u ON u.id = s.user_id
@@ -219,4 +204,3 @@ def get_session_user(session_id: str) -> dict[str, Any] | None:
             (session_id,),
         ).fetchone()
     return dict(row) if row else None
-

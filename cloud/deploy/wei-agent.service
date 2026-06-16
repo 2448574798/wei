@@ -6,9 +6,9 @@ Requires=docker.service
 [Service]
 User=ubuntu
 Group=ubuntu
-WorkingDirectory=/opt/wei
-EnvironmentFile=/opt/wei/.env
-ExecStart=/opt/wei/deploy/start_server.sh
+WorkingDirectory=/opt/wei/cloud
+EnvironmentFile=/opt/wei/cloud/.env
+ExecStart=/opt/wei/cloud/deploy/start_server.sh
 Restart=always
 RestartSec=5
 

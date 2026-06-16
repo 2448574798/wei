@@ -1,58 +1,31 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
 import os
 import re
 import subprocess
 import threading
 import time
-import urllib.error
 from collections import deque
-from dataclasses import dataclass, field
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect as websocket_connect
 
 
-DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 18100
-DEFAULT_USER_DATA_DIR = Path(r"D:\Download\playwright-user-data\edge-douyin-bridge")
+def _default_user_data_dir() -> Path:
+    local_appdata = os.getenv("LOCALAPPDATA", "").strip()
+    if local_appdata:
+        return Path(local_appdata) / "WeiAgent" / "playwright-user-data" / "edge-worker"
+    return Path.home() / ".wei-agent" / "playwright-user-data" / "edge-worker"
+
+
+DEFAULT_USER_DATA_DIR = _default_user_data_dir()
 DEFAULT_MCP_PROTOCOL_VERSION = "2025-11-25"
-VERIFICATION_PAGE_MARKERS = (
-    "\u9a8c\u8bc1\u7801\u4e2d\u95f4\u9875",
-    "\u8bf7\u5b8c\u6210\u4e0b\u5217\u9a8c\u8bc1\u540e\u7ee7\u7eed",
-    "\u62d6\u52a8\u5b8c\u6210\u4e0a\u65b9\u62fc\u56fe",
-    "\u6309\u4f4f\u5de6\u8fb9\u6309\u94ae\u62d6\u52a8\u5b8c\u6210\u4e0a\u65b9\u62fc\u56fe",
-)
-
-
-@dataclass
-class BrowserJob:
-    id: str
-    title: str
-    job_type: str
-    status: str = "running"
-    progress: list[str] = field(default_factory=list)
-    result: str = ""
-    error: str = ""
-    cancel_requested: bool = False
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "title": self.title,
-            "job_type": self.job_type,
-            "status": self.status,
-            "progress": list(self.progress),
-            "result": self.result,
-            "error": self.error,
-            "cancel_requested": self.cancel_requested,
-        }
+DEFAULT_BROWSER_DIAGNOSTICS_ENABLED = "false"
 
 
 class PlaywrightMcpClient:
@@ -511,21 +484,75 @@ def _parse_browser_evaluate_result(text: str) -> Any:
         return with_references_removed
 
 
+def _extract_image_content(tool_result: dict[str, Any]) -> dict[str, str]:
+    raw_result = tool_result.get("raw_result") if isinstance(tool_result.get("raw_result"), dict) else {}
+    content = raw_result.get("content") if isinstance(raw_result.get("content"), list) else []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "").strip() != "image":
+            continue
+        data = str(item.get("data") or "").strip()
+        if not data:
+            continue
+        mime_type = str(item.get("mimeType") or item.get("mime_type") or "image/png").strip() or "image/png"
+        return {"mime_type": mime_type, "data": data}
+    return {}
+
+
+def _optimise_image_content(image: dict[str, str]) -> dict[str, Any]:
+    if os.getenv("BROWSER_SCREENSHOT_OPTIMIZE", "true").strip().lower() in {"0", "false", "no", "off"}:
+        return dict(image)
+    data = str(image.get("data") or "").strip()
+    if not data:
+        return dict(image)
+    try:
+        from PIL import Image
+    except Exception:
+        return dict(image)
+
+    try:
+        max_width = max(480, min(int(os.getenv("BROWSER_SCREENSHOT_MAX_WIDTH", "1280") or "1280"), 2560))
+    except Exception:
+        max_width = 1280
+    try:
+        quality = max(35, min(int(os.getenv("BROWSER_SCREENSHOT_JPEG_QUALITY", "72") or "72"), 95))
+    except Exception:
+        quality = 72
+
+    try:
+        raw = base64.b64decode(data)
+        with Image.open(io.BytesIO(raw)) as source:
+            width, height = source.size
+            image_rgb = source.convert("RGB")
+            if width > max_width:
+                next_height = max(1, int(height * (max_width / float(width))))
+                image_rgb = image_rgb.resize((max_width, next_height), Image.Resampling.LANCZOS)
+            output = io.BytesIO()
+            image_rgb.save(output, format="JPEG", quality=quality, optimize=True)
+        optimised = base64.b64encode(output.getvalue()).decode("ascii")
+        if len(optimised) >= len(data):
+            return {**image, "optimized": False, "width": width, "height": height}
+        return {
+            "mime_type": "image/jpeg",
+            "data": optimised,
+            "optimized": True,
+            "original_mime_type": str(image.get("mime_type") or ""),
+            "original_base64_length": len(data),
+            "base64_length": len(optimised),
+            "width": width,
+            "height": height,
+        }
+    except Exception:
+        return dict(image)
+
+
+def _browser_diagnostics_enabled() -> bool:
+    return os.getenv("BROWSER_DIAGNOSTICS_ENABLED", DEFAULT_BROWSER_DIAGNOSTICS_ENABLED).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _json_string(value: str) -> str:
     return json.dumps(str(value or ""), ensure_ascii=False)
-
-
-def _manual_verification_message(title: str, text: str, url: str = "") -> str:
-    combined = "\n".join(part for part in (title, text, url) if part).strip()
-    if not combined:
-        return ""
-    for marker in VERIFICATION_PAGE_MARKERS:
-        if marker in combined:
-            return (
-                "Manual verification required: the current page is blocked by a captcha/verification challenge. "
-                "Complete it in the local browser, then retry."
-            )
-    return ""
 
 
 def _friendly_bridge_error_message(message: str) -> str:
@@ -539,7 +566,7 @@ def _friendly_bridge_error_message(message: str) -> str:
             return (
                 "Playwright MCP could not launch the browser profile. "
                 f"Close any Chrome windows using {profile_path}, then retry. "
-                "Do not manually open that same profile before Browser Bridge starts."
+                "Do not manually open that same profile before the local browser worker starts."
             )
         return (
             "Playwright MCP could not launch the browser profile. "
@@ -548,131 +575,8 @@ def _friendly_bridge_error_message(message: str) -> str:
     return detail
 
 
-def _mcp_target_to_selector(target: dict[str, Any], *, default_first: bool) -> str:
-    selector = ""
-    if str(target.get("selector") or "").strip():
-        selector = str(target.get("selector") or "").strip()
-    elif str(target.get("text") or "").strip():
-        selector = f"text={_json_string(str(target.get('text') or '').strip())}"
-    elif str(target.get("label") or "").strip():
-        selector = f"label={_json_string(str(target.get('label') or '').strip())}"
-    elif str(target.get("placeholder") or "").strip():
-        selector = f"placeholder={_json_string(str(target.get('placeholder') or '').strip())}"
-    elif str(target.get("role") or "").strip():
-        role = str(target.get("role") or "").strip()
-        name = str(target.get("name") or "").strip()
-        selector = f"role={role}"
-        if name:
-            selector += f"[name={_json_string(name)}]"
-            if bool(target.get("exact")):
-                selector += "[exact=true]"
-    if not selector:
-        return ""
-
-    nth = target.get("nth")
-    if nth is not None:
-        selector += f" >> nth={int(nth)}"
-    elif target.get("last"):
-        selector += " >> nth=-1"
-    elif default_first:
-        selector += " >> nth=0"
-    return selector
-
-
-def _mcp_selector_targets(step: dict[str, Any], *, default_first: bool) -> list[dict[str, Any]]:
-    raw_targets = step.get("targets") if isinstance(step.get("targets"), list) else []
-    candidates = [item for item in raw_targets if isinstance(item, dict)]
-    if not candidates:
-        fallback = {
-            key: step.get(key)
-            for key in ("selector", "text", "role", "label", "placeholder", "name", "exact", "nth", "last")
-            if key in step
-        }
-        if fallback:
-            candidates = [fallback]
-
-    resolved: list[dict[str, Any]] = []
-    for target in candidates:
-        selector = _mcp_target_to_selector(target, default_first=default_first)
-        if selector:
-            resolved.append({"selector": selector, "raw": target})
-    return resolved
-
-
-def _mcp_css_targets(step: dict[str, Any]) -> list[dict[str, Any]]:
-    raw_targets = step.get("targets") if isinstance(step.get("targets"), list) else []
-    candidates = [item for item in raw_targets if isinstance(item, dict)]
-    if not candidates and str(step.get("selector") or "").strip():
-        candidates = [{"selector": str(step.get("selector") or "").strip()}]
-
-    resolved: list[dict[str, Any]] = []
-    for target in candidates:
-        selector = str(target.get("selector") or "").strip()
-        if not selector:
-            continue
-        nth = target.get("nth")
-        last = bool(target.get("last"))
-        resolved.append(
-            {
-                "selector": selector,
-                "nth": int(nth) if nth is not None else None,
-                "last": last,
-                "raw": target,
-            }
-        )
-    return resolved
-
-
-def _step_has_supported_target(step: dict[str, Any]) -> bool:
-    return any(str(step.get(key) or "").strip() for key in ("selector", "text", "role", "label", "placeholder"))
-
-
-def _step_has_selector_target(step: dict[str, Any]) -> bool:
-    if str(step.get("selector") or "").strip():
-        return True
-    targets = step.get("targets") if isinstance(step.get("targets"), list) else []
-    return any(isinstance(item, dict) and str(item.get("selector") or "").strip() for item in targets)
-
-
-def _steps_prefer_mcp_readonly(steps: list[dict[str, Any]] | None) -> bool:
-    readonly_step_types = {"wait", "goto", "click", "click_any", "press", "extract_text", "extract_any_text", "extract_list_text", "snapshot"}
-    for step in steps or []:
-        if not isinstance(step, dict):
-            return False
-        step_type = str(step.get("type") or "").strip().lower()
-        if step_type not in readonly_step_types:
-            return False
-        if step_type in {"click", "extract_text"} and not _step_has_supported_target(step):
-            return False
-        if step_type in {"click_any", "extract_any_text"}:
-            targets = step.get("targets") if isinstance(step.get("targets"), list) else []
-            if targets:
-                if not any(isinstance(item, dict) and _step_has_supported_target(item) for item in targets):
-                    return False
-            elif not _step_has_supported_target(step):
-                return False
-        if step_type == "press" and _step_has_supported_target(step):
-            return False
-        if step_type == "extract_list_text" and not _step_has_selector_target(step):
-            return False
-    return True
-
-
-def _with_backend_metadata(
-    result: dict[str, Any],
-    *,
-    backend: str,
-) -> dict[str, Any]:
-    enriched = dict(result)
-    enriched["backend"] = backend
-    return enriched
-
-
 class BrowserBridge:
     def __init__(self) -> None:
-        self.host = os.getenv("BROWSER_BRIDGE_HOST", DEFAULT_HOST).strip() or DEFAULT_HOST
-        self.port = int(os.getenv("BROWSER_BRIDGE_PORT", str(DEFAULT_PORT)))
-        self.token = os.getenv("BROWSER_BRIDGE_TOKEN", "").strip()
         self.user_data_dir = self._resolve_user_data_dir()
         self.playwright_mcp = PlaywrightMcpClient(user_data_dir=self.user_data_dir)
         self.worker_enabled = os.getenv("BROWSER_WORKER_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -681,9 +585,6 @@ class BrowserBridge:
         self.worker_ws_url = self._resolve_worker_ws_url()
         self.worker_reconnect_sec = max(3, min(int(os.getenv("BROWSER_WORKER_RECONNECT_SEC", "5") or "5"), 60))
         self._worker_thread: threading.Thread | None = None
-
-        self._jobs_lock = threading.Lock()
-        self._jobs: dict[str, BrowserJob] = {}
 
     def _resolve_user_data_dir(self) -> Path:
         configured = os.getenv("PLAYWRIGHT_USER_DATA_DIR", "").strip()
@@ -698,11 +599,6 @@ class BrowserBridge:
         elif configured.startswith("https://"):
             configured = "wss://" + configured[len("https://") :]
         return configured
-
-    def _append_job_progress(self, job: BrowserJob, message: str) -> None:
-        text = re.sub(r"\s+", " ", (message or "").strip())
-        if text:
-            job.progress.append(text)
 
     def worker_status(self) -> dict[str, Any]:
         return {
@@ -722,6 +618,26 @@ class BrowserBridge:
     def restart_playwright_mcp(self) -> dict[str, Any]:
         return self.playwright_mcp.restart()
 
+    def _playwright_mcp_tool_names(self) -> set[str]:
+        try:
+            payload = self.playwright_mcp_tools(refresh=False)
+        except Exception:
+            return set()
+        tools = payload.get("tools") if isinstance(payload.get("tools"), list) else []
+        return {
+            str(item.get("name") or "").strip()
+            for item in tools
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        }
+
+    def _available_tool_candidates(self, names: list[str]) -> list[str]:
+        available = self._playwright_mcp_tool_names()
+        if not available:
+            return names
+        preferred = [name for name in names if name in available]
+        fallback = [name for name in names if name not in preferred]
+        return [*preferred, *fallback]
+
     def handle_worker_command(self, command: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         command_name = str(command or "").strip().lower()
         data = payload if isinstance(payload, dict) else {}
@@ -737,18 +653,20 @@ class BrowserBridge:
                 target=str(data.get("target") or "").strip(),
                 depth=int(data["depth"]) if data.get("depth") is not None else None,
             )
-        if command_name == "browser.interact":
-            return self.interact_prefer_mcp_readonly(
+        if command_name == "browser.screenshot":
+            return self.playwright_mcp_screenshot(
                 url=str(data.get("url") or "").strip(),
                 instruction=str(data.get("instruction") or "").strip(),
-                steps=data.get("steps") if isinstance(data.get("steps"), list) else [],
                 wait_ms=int(data.get("wait_ms") or 1000),
             )
-        if command_name == "browser.status":
-            return {
-                "worker": self.worker_status(),
-                "playwright_mcp": self.playwright_mcp_status(ensure_started=True),
-            }
+        if command_name == "browser.hit_test":
+            return self.playwright_mcp_hit_test(
+                x=data.get("x"),
+                y=data.get("y"),
+                target_description=str(data.get("target_description") or "").strip(),
+            )
+        if command_name == "browser.visual_action":
+            return self.playwright_mcp_visual_action(data)
         raise ValueError(f"Unsupported browser worker command: {command_name or '<empty>'}")
 
     def playwright_mcp_tabs(self) -> dict[str, Any]:
@@ -789,106 +707,115 @@ class BrowserBridge:
         if result.get("is_error"):
             raise RuntimeError(str(result.get("text") or "Playwright MCP browser_wait_for failed.").strip())
 
-    def _playwright_mcp_click(self, selector: str) -> tuple[bool, str]:
-        click_result = self.playwright_mcp.call_tool("browser_click", {"target": selector})
-        if not click_result.get("is_error"):
-            return True, ""
-
-        last_error = str(click_result.get("text") or "Playwright MCP browser_click failed.").strip()
-        js = (
-            "(element) => { "
-            "if (!element) return { ok: false, reason: 'not_found' }; "
-            "const clickable = element.closest('a,button,[role=\"button\"],[href],[data-e2e]') || element; "
-            "clickable.scrollIntoView({ block: 'center', inline: 'center' }); "
-            "clickable.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window })); "
-            "if (typeof clickable.click === 'function') clickable.click(); "
-            "return { ok: true }; }"
-        )
-        fallback_result = self.playwright_mcp.call_tool("browser_evaluate", {"target": selector, "function": js})
-        if fallback_result.get("is_error"):
-            return False, last_error
-        parsed = _parse_browser_evaluate_result(str(fallback_result.get("text_raw") or fallback_result.get("text") or ""))
-        if isinstance(parsed, dict) and parsed.get("ok") is True:
-            return True, ""
-        return False, last_error
-
-    def _playwright_mcp_extract_text(self, selector: str, *, limit: int) -> str:
-        result = self.playwright_mcp.call_tool(
-            "browser_evaluate",
-            {
-                "target": selector,
-                "function": "(element) => ((element.innerText || element.textContent || '').trim())",
-            },
-        )
-        if result.get("is_error"):
-            raise RuntimeError(str(result.get("text") or "Playwright MCP browser_evaluate failed.").strip())
-        parsed = _parse_browser_evaluate_result(str(result.get("text_raw") or result.get("text") or ""))
-        if isinstance(parsed, str):
-            return _compact_text(parsed, limit)
-        return _compact_text(json.dumps(parsed, ensure_ascii=False), limit)
-
-    def _playwright_mcp_extract_list_text(self, selector: str, *, item_limit: int, limit: int, nth: int | None = None, last: bool = False) -> list[str]:
-        if nth is not None:
-            js = (
-                f"() => {{ const items = Array.from(document.querySelectorAll({_json_string(selector)})); "
-                f"const match = items[{int(nth)}]; if (!match) return []; "
-                f"const text = ((match.innerText || match.textContent || '').replace(/\\s+/g, ' ').trim()).slice(0, {int(limit)}); "
-                "return text ? [text] : []; }"
-            )
-        elif last:
-            js = (
-                f"() => {{ const items = Array.from(document.querySelectorAll({_json_string(selector)})); "
-                "const match = items.length ? items[items.length - 1] : null; if (!match) return []; "
-                f"const text = ((match.innerText || match.textContent || '').replace(/\\s+/g, ' ').trim()).slice(0, {int(limit)}); "
-                "return text ? [text] : []; }"
-            )
-        else:
-            js = (
-                f"() => Array.from(document.querySelectorAll({_json_string(selector)}))"
-                f".slice(0, {int(item_limit)})"
-                f".map((element) => ((element.innerText || element.textContent || '').replace(/\\s+/g, ' ').trim()).slice(0, {int(limit)}))"
-                ".filter(Boolean)"
-            )
+    def _playwright_mcp_page_diagnostics(self, *, limit: int = 2400) -> dict[str, Any]:
+        js = r"""() => {
+  const compact = (value, max = 180) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+  const cssEscape = (value) => window.CSS && CSS.escape
+    ? CSS.escape(String(value || ''))
+    : String(value || '').replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char}`);
+  const attrEscape = (value) => String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const visible = (element) => {
+    if (!element || !(element instanceof Element)) return false;
+    const style = window.getComputedStyle(element);
+    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+    const rect = element.getBoundingClientRect();
+    return rect.width > 1 && rect.height > 1 && rect.bottom >= 0 && rect.right >= 0
+      && rect.top <= window.innerHeight && rect.left <= window.innerWidth;
+  };
+  const cssPath = (element) => {
+    if (!element || !(element instanceof Element)) return '';
+    if (element.id) return `#${cssEscape(element.id)}`;
+    const dataE2e = element.getAttribute('data-e2e');
+    if (dataE2e) return `[data-e2e="${attrEscape(dataE2e)}"]`;
+    const aria = element.getAttribute('aria-label');
+    if (aria) return `${element.tagName.toLowerCase()}[aria-label="${attrEscape(aria)}"]`;
+    const parts = [];
+    let node = element;
+    while (node && node instanceof Element && parts.length < 4) {
+      let part = node.tagName.toLowerCase();
+      const cls = Array.from(node.classList || []).filter(Boolean).slice(0, 2);
+      if (cls.length) part += '.' + cls.map((name) => cssEscape(name)).join('.');
+      const parent = node.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children).filter((child) => child.tagName === node.tagName);
+        if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+      }
+      parts.unshift(part);
+      node = parent;
+    }
+    return parts.join(' > ');
+  };
+  const describe = (element) => {
+    const rect = element.getBoundingClientRect();
+    const inputValue = ['INPUT', 'TEXTAREA'].includes(element.tagName) ? element.value : '';
+    return {
+      tag: element.tagName.toLowerCase(),
+      role: compact(element.getAttribute('role'), 60),
+      text: compact(element.innerText || element.textContent || inputValue, 160),
+      ariaLabel: compact(element.getAttribute('aria-label'), 120),
+      title: compact(element.getAttribute('title'), 120),
+      placeholder: compact(element.getAttribute('placeholder'), 120),
+      dataE2e: compact(element.getAttribute('data-e2e'), 80),
+      type: compact(element.getAttribute('type'), 40),
+      href: compact(element.getAttribute('href'), 160),
+      selector: cssPath(element),
+      rect: {
+        x: Math.round(rect.x), y: Math.round(rect.y),
+        width: Math.round(rect.width), height: Math.round(rect.height)
+      }
+    };
+  };
+  const controlSelector = [
+    'button', 'a[href]', '[role="button"]', '[role="link"]',
+    'input', 'textarea', 'select', '[contenteditable="true"]',
+    '[aria-label]', '[data-e2e]'
+  ].join(',');
+  const controls = Array.from(document.querySelectorAll(controlSelector))
+    .filter(visible)
+    .map(describe)
+    .filter((item) => item.text || item.ariaLabel || item.placeholder || item.dataE2e || item.title || item.href)
+    .slice(0, 80);
+  const headings = Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"]'))
+    .filter(visible)
+    .map((element) => compact(element.innerText || element.textContent, 160))
+    .filter(Boolean)
+    .slice(0, 20);
+  const dialogs = Array.from(document.querySelectorAll('[role="dialog"], dialog, .modal, [class*="modal"], [class*="popup"], [class*="mask"]'))
+    .filter(visible)
+    .map(describe)
+    .slice(0, 20);
+  const bodyText = compact(document.body ? document.body.innerText : '', 1200);
+  const active = document.activeElement && document.activeElement !== document.body ? describe(document.activeElement) : null;
+  return {
+    readyState: document.readyState,
+    url: location.href,
+    title: document.title,
+    viewport: { width: window.innerWidth, height: window.innerHeight, devicePixelRatio: window.devicePixelRatio || 1 },
+    scroll: { x: Math.round(window.scrollX), y: Math.round(window.scrollY), height: Math.round(document.documentElement.scrollHeight || 0) },
+    visibleText: bodyText,
+    headings,
+    dialogs,
+    controls,
+    activeElement: active
+  };
+}"""
         result = self.playwright_mcp.call_tool("browser_evaluate", {"function": js})
         if result.get("is_error"):
-            raise RuntimeError(str(result.get("text") or "Playwright MCP browser_evaluate failed.").strip())
+            return {"ok": False, "error": str(result.get("text") or "Playwright MCP browser_evaluate failed.").strip()}
         parsed = _parse_browser_evaluate_result(str(result.get("text_raw") or result.get("text") or ""))
-        if isinstance(parsed, list):
-            return [_compact_text(item, limit) for item in parsed if str(item or "").strip()]
-        if isinstance(parsed, str):
-            cleaned = _compact_text(parsed, limit)
-            return [cleaned] if cleaned else []
-        if parsed:
-            cleaned = _compact_text(json.dumps(parsed, ensure_ascii=False), limit)
-            return [cleaned] if cleaned else []
-        return []
-
-    def _playwright_mcp_snapshot_text(self, *, target: str = "", limit: int = 3000, depth: int | None = None) -> str:
-        args: dict[str, Any] = {}
-        if str(target or "").strip():
-            args["target"] = str(target).strip()
-        if depth is not None:
-            args["depth"] = int(depth)
-        result = self.playwright_mcp.call_tool("browser_snapshot", args)
-        if result.get("is_error"):
-            raise RuntimeError(str(result.get("text") or "Playwright MCP browser_snapshot failed.").strip())
-        return _compact_text(str(result.get("text_raw") or result.get("text") or ""), limit)
-
-    def _raise_if_manual_verification_page(self, *, instruction: str = "", url: str = "") -> None:
-        snapshot = self.playwright_mcp_snapshot(
-            url="",
-            instruction=instruction,
-            wait_ms=0,
-            target="body >> nth=0",
-        )
-        title = str(snapshot.get("title") or "").strip()
-        current_url = str(snapshot.get("url") or url or "").strip()
-        text = str(snapshot.get("text") or "").strip()
-        manual_notice = _manual_verification_message(title, text, current_url)
-        if manual_notice:
-            raise RuntimeError(
-                f"{manual_notice} Page title: {title or '-'} Page URL: {current_url or '-'}"
-            )
+        if not isinstance(parsed, dict):
+            return {"ok": False, "raw": _compact_text(parsed, limit)}
+        controls = parsed.get("controls") if isinstance(parsed.get("controls"), list) else []
+        dialogs = parsed.get("dialogs") if isinstance(parsed.get("dialogs"), list) else []
+        headings = parsed.get("headings") if isinstance(parsed.get("headings"), list) else []
+        parsed["controls"] = controls[:80]
+        parsed["dialogs"] = dialogs[:20]
+        parsed["headings"] = headings[:20]
+        parsed["visibleText"] = _compact_text(parsed.get("visibleText", ""), limit)
+        parsed["ok"] = True
+        parsed["controlCount"] = len(controls)
+        parsed["dialogCount"] = len(dialogs)
+        return parsed
 
     def playwright_mcp_snapshot(
         self,
@@ -922,6 +849,7 @@ class BrowserBridge:
         structured_tabs = tabs.get("structured_content") if isinstance(tabs.get("structured_content"), dict) else {}
         current_tab = _extract_current_tab(structured_tabs)
         snapshot_text = str(result.get("text_raw") or result.get("text") or "").strip()
+        diagnostics = self._playwright_mcp_page_diagnostics() if _browser_diagnostics_enabled() else {}
         resolved_url = str(current_tab.get("url") or target_url or "").strip()
         resolved_title = str(current_tab.get("title") or "").strip()
         return {
@@ -930,440 +858,329 @@ class BrowserBridge:
             "title": resolved_title,
             "instruction": str(instruction or "").strip(),
             "text": snapshot_text,
+            "diagnostics": diagnostics,
             "tool_result": result,
             "tabs": tabs,
         }
 
-    def playwright_mcp_interact_readonly(
+    def playwright_mcp_screenshot(
         self,
         *,
         url: str = "",
         instruction: str = "",
-        steps: list[dict[str, Any]] | None = None,
         wait_ms: int = 1000,
     ) -> dict[str, Any]:
         target_url = str(url or "").strip()
-        interaction_steps = [item for item in (steps or []) if isinstance(item, dict)]
         if target_url:
             self.playwright_mcp_navigate(target_url)
         if wait_ms > 0:
             self._playwright_mcp_wait(wait_ms)
-        self._raise_if_manual_verification_page(instruction=instruction, url=target_url)
 
-        extracts: list[dict[str, Any]] = []
-        step_results: list[dict[str, Any]] = []
-        snapshot_text = ""
-
-        for index, step in enumerate(interaction_steps, start=1):
-            step_type = str(step.get("type") or "").strip().lower()
-            timeout_ms = max(500, min(int(step.get("timeout_ms") or 5000), 60000))
-            wait_after = max(0, min(int(step.get("wait_ms") or 0), 60000))
-            if step_type == "wait":
-                explicit_wait = int(step.get("ms") or step.get("wait_ms") or 1000)
-                self._playwright_mcp_wait(explicit_wait)
-                step_results.append({"index": index, "type": step_type, "status": "ok"})
+        result: dict[str, Any] = {}
+        image: dict[str, str] = {}
+        screenshot_tool = ""
+        last_error = ""
+        for tool_name in self._available_tool_candidates(["browser_take_screenshot", "browser_screenshot"]):
+            try:
+                result = self.playwright_mcp.call_tool(tool_name, {})
+            except Exception as exc:
+                last_error = str(exc)
                 continue
-
-            if step_type == "goto":
-                next_url = str(step.get("url") or "").strip()
-                if not next_url:
-                    raise ValueError(f"Step {index} goto requires a url.")
-                self.playwright_mcp_navigate(next_url)
-                if wait_after > 0:
-                    self._playwright_mcp_wait(wait_after)
-                step_results.append({"index": index, "type": step_type, "status": "ok", "url": next_url})
+            if result.get("is_error"):
+                last_error = str(result.get("text") or f"Playwright MCP {tool_name} failed.").strip()
                 continue
+            image = _extract_image_content(result)
+            if image:
+                image = _optimise_image_content(image)
+                screenshot_tool = tool_name
+                break
+        if not image:
+            raise RuntimeError(last_error or "Playwright MCP screenshot returned no image content.")
 
-            if step_type == "press":
-                if _step_has_supported_target(step):
-                    raise ValueError(f"Step {index} press with element target is not supported in MCP readonly mode.")
-                key = str(step.get("key") or "").strip()
-                if not key:
-                    raise ValueError(f"Step {index} press requires a key.")
-                press_result = self.playwright_mcp.call_tool("browser_press_key", {"key": key})
-                if press_result.get("is_error"):
-                    raise RuntimeError(str(press_result.get("text") or "Playwright MCP browser_press_key failed.").strip())
-                if wait_after <= 0:
-                    wait_after = min(timeout_ms, 800)
-                if wait_after > 0:
-                    self._playwright_mcp_wait(wait_after)
-                step_results.append({"index": index, "type": step_type, "status": "ok", "key": key})
-                continue
-
-            if step_type == "click":
-                candidates = _mcp_selector_targets(step, default_first=True)
-                if not candidates:
-                    raise ValueError(f"Step {index} click requires a supported selector, text, role, label, or placeholder target.")
-                selector = str(candidates[0]["selector"])
-                click_ok, click_error = self._playwright_mcp_click(selector)
-                if not click_ok:
-                    if bool(step.get("optional")):
-                        step_results.append({"index": index, "type": step_type, "status": "skipped", "target": selector})
-                        continue
-                    raise RuntimeError(click_error or "Playwright MCP browser_click failed.")
-                if wait_after <= 0:
-                    wait_after = min(timeout_ms, 1500)
-                if wait_after > 0:
-                    self._playwright_mcp_wait(wait_after)
-                step_results.append({"index": index, "type": step_type, "status": "ok", "target": selector})
-                continue
-
-            if step_type == "click_any":
-                candidates = _mcp_selector_targets(step, default_first=True)
-                if not candidates:
-                    raise ValueError(f"Step {index} click_any requires supported targets, selectors, texts, roles, labels, or placeholders.")
-                last_error = "No candidates attempted."
-                matched_target = ""
-                for candidate in candidates:
-                    selector = str(candidate["selector"])
-                    click_ok, click_error = self._playwright_mcp_click(selector)
-                    if not click_ok:
-                        last_error = click_error or "Playwright MCP browser_click failed."
-                        continue
-                    matched_target = selector
-                    last_error = ""
-                    break
-                if last_error:
-                    if bool(step.get("optional")):
-                        step_results.append({"index": index, "type": step_type, "status": "skipped"})
-                        continue
-                    self._raise_if_manual_verification_page(instruction=instruction, url=target_url)
-                    raise RuntimeError(f"Step {index} click_any failed: {last_error}")
-                if wait_after <= 0:
-                    wait_after = min(timeout_ms, 1500)
-                if wait_after > 0:
-                    self._playwright_mcp_wait(wait_after)
-                step_results.append({"index": index, "type": step_type, "status": "ok", "target": matched_target})
-                continue
-
-            if step_type == "extract_text":
-                candidates = _mcp_selector_targets(step, default_first=True)
-                if not candidates:
-                    raise ValueError(f"Step {index} extract_text requires a supported selector, text, role, label, or placeholder target.")
-                selector = str(candidates[0]["selector"])
-                extracted_text = self._playwright_mcp_extract_text(selector, limit=int(step.get("limit") or 1000))
-                name = str(step.get("name") or f"extract_{index}").strip()
-                extracts.append({"name": name, "text": extracted_text})
-                step_results.append({"index": index, "type": step_type, "status": "ok", "name": name, "target": selector})
-                continue
-
-            if step_type == "extract_any_text":
-                candidates = _mcp_selector_targets(step, default_first=True)
-                if not candidates:
-                    raise ValueError(f"Step {index} extract_any_text requires supported targets, selectors, texts, roles, labels, or placeholders.")
-                last_error = "No candidates attempted."
-                extracted_text = ""
-                matched_target = ""
-                for candidate in candidates:
-                    selector = str(candidate["selector"])
-                    try:
-                        extracted_text = self._playwright_mcp_extract_text(selector, limit=int(step.get("limit") or 1000))
-                        if not extracted_text:
-                            raise RuntimeError("Matched element was empty.")
-                        matched_target = selector
-                        last_error = ""
-                        break
-                    except Exception as exc:
-                        last_error = str(exc)
-                if last_error:
-                    self._raise_if_manual_verification_page(instruction=instruction, url=target_url)
-                    raise RuntimeError(f"Step {index} extract_any_text failed: {last_error}")
-                name = str(step.get("name") or f"extract_{index}").strip()
-                extracts.append({"name": name, "text": extracted_text})
-                step_results.append({"index": index, "type": step_type, "status": "ok", "name": name, "target": matched_target})
-                continue
-
-            if step_type == "extract_list_text":
-                candidates = _mcp_css_targets(step)
-                if not candidates:
-                    raise ValueError(f"Step {index} extract_list_text requires selector-based targets for MCP readonly mode.")
-                item_limit = max(1, min(int(step.get("item_limit") or 8), 50))
-                joiner = str(step.get("joiner") or " || ").strip() or " || "
-                last_error = "No candidates attempted."
-                matched_target = ""
-                extracted_items: list[str] = []
-                for candidate in candidates:
-                    selector = str(candidate["selector"])
-                    try:
-                        extracted_items = self._playwright_mcp_extract_list_text(
-                            selector,
-                            item_limit=item_limit,
-                            limit=int(step.get("limit") or 400),
-                            nth=candidate.get("nth"),
-                            last=bool(candidate.get("last")),
-                        )
-                        if not extracted_items:
-                            raise RuntimeError("Matched elements were empty.")
-                        matched_target = selector
-                        last_error = ""
-                        break
-                    except Exception as exc:
-                        last_error = str(exc)
-                if last_error:
-                    self._raise_if_manual_verification_page(instruction=instruction, url=target_url)
-                    raise RuntimeError(f"Step {index} extract_list_text failed: {last_error}")
-                name = str(step.get("name") or f"extract_{index}").strip()
-                extracts.append({"name": name, "text": joiner.join(extracted_items)})
-                step_results.append(
-                    {
-                        "index": index,
-                        "type": step_type,
-                        "status": "ok",
-                        "name": name,
-                        "target": matched_target,
-                        "count": len(extracted_items),
-                    }
-                )
-                continue
-
-            if step_type == "snapshot":
-                candidates = _mcp_selector_targets(step, default_first=True)
-                selector = str(candidates[0]["selector"]) if candidates else "body >> nth=0"
-                snapshot_text = self._playwright_mcp_snapshot_text(
-                    target=selector,
-                    limit=int(step.get("limit") or 3000),
-                )
-                step_results.append({"index": index, "type": step_type, "status": "ok", "target": selector})
-                continue
-
-            raise ValueError(f"Unsupported interaction step type for MCP readonly mode: {step_type or '<empty>'}")
-
-        if not snapshot_text:
-            snapshot_text = self._playwright_mcp_snapshot_text(target="body >> nth=0", limit=3000)
-
+        diagnostics = self._playwright_mcp_page_diagnostics() if _browser_diagnostics_enabled() else {}
         tabs = self.playwright_mcp_tabs()
         structured_tabs = tabs.get("structured_content") if isinstance(tabs.get("structured_content"), dict) else {}
         current_tab = _extract_current_tab(structured_tabs)
-        current_url = str(current_tab.get("url") or target_url or "").strip()
-        current_title = str(current_tab.get("title") or "").strip()
         return {
             "ok": True,
-            "title": current_title,
-            "url": current_url,
+            "url": str(current_tab.get("url") or target_url or diagnostics.get("url") or "").strip(),
+            "title": str(current_tab.get("title") or diagnostics.get("title") or "").strip(),
             "instruction": str(instruction or "").strip(),
-            "text": snapshot_text,
-            "extracts": extracts,
-            "step_results": step_results,
+            "mime_type": image["mime_type"],
+            "image_base64": image["data"],
+            "screenshot_backend": screenshot_tool or "playwright_mcp",
+            "image_optimized": bool(image.get("optimized")),
+            "image_base64_length": int(image.get("base64_length") or len(str(image.get("data") or ""))),
+            "original_image_base64_length": int(image.get("original_base64_length") or 0),
+            "diagnostics": diagnostics,
             "tabs": tabs,
         }
 
-    def interact_prefer_mcp_readonly(
-        self,
-        url: str = "",
-        *,
-        instruction: str = "",
-        steps: list[dict[str, Any]] | None = None,
-        wait_ms: int = 1000,
-        page_index: int | None = None,
-    ) -> dict[str, Any]:
-        interaction_steps = [item for item in (steps or []) if isinstance(item, dict)]
-        if not _steps_prefer_mcp_readonly(interaction_steps):
-            raise ValueError(
-                "MCP-only Browser Bridge supports readonly steps only: wait, goto, click, click_any, press, "
-                "extract_text, extract_any_text, extract_list_text, and snapshot."
-            )
-        result = self.playwright_mcp_interact_readonly(
-            url=url,
-            instruction=instruction,
-            steps=interaction_steps,
-            wait_ms=wait_ms,
-        )
-        return _with_backend_metadata(result, backend="playwright_mcp")
-
-    def start_job(self, payload: dict[str, Any]) -> dict[str, Any]:
-        job_type = str(payload.get("job_type") or "").strip()
-        if job_type not in {"watch_text", "interaction_watch"}:
-            raise ValueError(f"Unsupported job_type: {job_type or '<empty>'}")
-
-        job = BrowserJob(
-            id=str(uuid4()),
-            title=str(payload.get("title") or "Local webpage watch").strip() or "Local webpage watch",
-            job_type=job_type,
-        )
-        with self._jobs_lock:
-            self._jobs[job.id] = job
-
-        thread = threading.Thread(
-            target=self._run_watch_text_job if job_type == "watch_text" else self._run_interaction_watch_job,
-            args=(job.id, payload),
-            daemon=True,
-        )
-        thread.start()
-        return {"ok": True, "job_id": job.id, "status": job.status}
-
-    def _run_watch_text_job(self, job_id: str, payload: dict[str, Any]) -> None:
-        job = self._jobs[job_id]
-        url = str(payload.get("url") or "").strip()
-        keyword = str(payload.get("keyword") or "").strip()
-        rounds = max(1, min(int(payload.get("rounds") or 20), 200))
-        interval_sec = max(2, min(int(payload.get("interval_sec") or 8), 300))
-        wait_ms = max(1000, min(int(payload.get("wait_ms") or 3000), 15000))
-
+    def _normalised_point_to_viewport_js(self, x: Any, y: Any) -> str:
         try:
-            if not url:
-                raise ValueError("url is required")
-            if not keyword:
-                raise ValueError("keyword is required")
-
-            lowered_keyword = keyword.lower()
-            for index in range(rounds):
-                if job.cancel_requested:
-                    job.status = "cancelled"
-                    self._append_job_progress(job, "Job cancelled.")
-                    job.result = "Job cancelled."
-                    return
-
-                snapshot = self.playwright_mcp_snapshot(url=url, instruction=keyword, wait_ms=wait_ms)
-                text = str(snapshot.get("text") or "")
-                excerpt = text[:240] or "[No body text extracted]"
-                self._append_job_progress(job, f"Round {index + 1}: {excerpt}")
-
-                if lowered_keyword in text.lower():
-                    job.status = "completed"
-                    job.result = f"Matched keyword: {keyword}\n{text[:2000]}"
-                    self._append_job_progress(job, f"Matched keyword: {keyword}")
-                    return
-
-                if index < rounds - 1:
-                    time.sleep(interval_sec)
-
-            job.status = "completed"
-            job.result = f"Keyword not found: {keyword}"
-            self._append_job_progress(job, f"Keyword not found: {keyword}")
+            norm_x = max(0.0, min(float(x), 1000.0))
+            norm_y = max(0.0, min(float(y), 1000.0))
         except Exception as exc:
-            job.status = "failed"
-            job.error = str(exc)
-            self._append_job_progress(job, f"Execution failed: {exc}")
+            raise ValueError("Visual action requires numeric x and y coordinates from 0 to 1000.") from exc
+        return (
+            "() => { "
+            f"const x = Math.round((window.innerWidth || 1) * {norm_x} / 1000); "
+            f"const y = Math.round((window.innerHeight || 1) * {norm_y} / 1000); "
+            "return { x, y, viewport: { width: window.innerWidth, height: window.innerHeight } }; "
+            "}"
+        )
 
-    def _run_interaction_watch_job(self, job_id: str, payload: dict[str, Any]) -> None:
-        job = self._jobs[job_id]
-        url = str(payload.get("url") or "").strip()
-        keyword = str(payload.get("keyword") or "").strip()
-        rounds = max(1, min(int(payload.get("rounds") or 20), 500))
-        interval_sec = max(1, min(int(payload.get("interval_sec") or 8), 300))
-        wait_ms = max(0, min(int(payload.get("wait_ms") or 1500), 15000))
-        steps = payload.get("steps") if isinstance(payload.get("steps"), list) else []
-        advance_steps = payload.get("advance_steps") if isinstance(payload.get("advance_steps"), list) else []
-        match_extract_names = {
-            str(item).strip()
-            for item in (payload.get("match_extract_names") or [])
-            if str(item).strip()
+    def _playwright_mcp_click_normalised(self, x: Any, y: Any) -> dict[str, Any]:
+        point_result = self.playwright_mcp.call_tool("browser_evaluate", {"function": self._normalised_point_to_viewport_js(x, y)})
+        if point_result.get("is_error"):
+            raise RuntimeError(str(point_result.get("text") or "Playwright MCP browser_evaluate failed.").strip())
+        point = _parse_browser_evaluate_result(str(point_result.get("text_raw") or point_result.get("text") or ""))
+        if not isinstance(point, dict):
+            raise RuntimeError("Could not resolve visual click coordinates.")
+        css_x = int(point.get("x") or 0)
+        css_y = int(point.get("y") or 0)
+        native_result = self._playwright_mcp_native_coordinate_click(css_x, css_y)
+        if native_result.get("ok"):
+            return native_result
+        js = (
+            "() => { "
+            f"const x = {css_x}; const y = {css_y}; "
+            "const element = document.elementFromPoint(x, y); "
+            "if (!element) return { ok: false, reason: 'no_element', x, y }; "
+            "const target = element.closest('button,a,[role=\"button\"],[role=\"link\"],input,textarea,select,[contenteditable=\"true\"],[data-e2e]') || element; "
+            "target.scrollIntoView({ block: 'center', inline: 'center' }); "
+            "for (const type of ['pointerdown','mousedown','pointerup','mouseup','click']) { "
+            "  target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y })); "
+            "} "
+            "if (typeof target.click === 'function') target.click(); "
+            "return { ok: true, x, y, tag: target.tagName, text: (target.innerText || target.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 160) }; "
+            "}"
+        )
+        click_result = self.playwright_mcp.call_tool("browser_evaluate", {"function": js})
+        if click_result.get("is_error"):
+            raise RuntimeError(str(click_result.get("text") or "Playwright MCP coordinate click failed.").strip())
+        parsed = _parse_browser_evaluate_result(str(click_result.get("text_raw") or click_result.get("text") or ""))
+        if isinstance(parsed, dict) and parsed.get("ok") is True:
+            return {"ok": True, "x": css_x, "y": css_y, "backend": "dom_dispatch", "target": parsed}
+        raise RuntimeError(f"Coordinate click failed: {parsed}")
+
+    def _playwright_mcp_native_coordinate_click(self, css_x: int, css_y: int) -> dict[str, Any]:
+        candidates = [
+            ("browser_screen_click", {"x": css_x, "y": css_y}),
+            ("browser_mouse_click_xy", {"x": css_x, "y": css_y}),
+            ("browser_click_xy", {"x": css_x, "y": css_y}),
+        ]
+        available = self._playwright_mcp_tool_names()
+        last_error = ""
+        for tool_name, args in candidates:
+            if available and tool_name not in available:
+                continue
+            try:
+                result = self.playwright_mcp.call_tool(tool_name, args)
+            except Exception as exc:
+                last_error = str(exc)
+                continue
+            if result.get("is_error"):
+                last_error = str(result.get("text") or f"Playwright MCP {tool_name} failed.").strip()
+                continue
+            return {
+                "ok": True,
+                "x": css_x,
+                "y": css_y,
+                "backend": tool_name,
+                "text": str(result.get("text") or "").strip(),
+            }
+        return {"ok": False, "error": last_error}
+
+    def playwright_mcp_hit_test(self, *, x: Any, y: Any, target_description: str = "") -> dict[str, Any]:
+        try:
+            norm_x = max(0.0, min(float(x), 1000.0))
+            norm_y = max(0.0, min(float(y), 1000.0))
+        except Exception as exc:
+            raise ValueError("Hit test requires numeric x and y coordinates from 0 to 1000.") from exc
+        js = r"""() => {
+  const compact = (value, max = 180) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+  const cssEscape = (value) => window.CSS && CSS.escape
+    ? CSS.escape(String(value || ''))
+    : String(value || '').replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char}`);
+  const attrEscape = (value) => String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const cssPath = (element) => {
+    if (!element || !(element instanceof Element)) return '';
+    if (element.id) return `#${cssEscape(element.id)}`;
+    const dataE2e = element.getAttribute('data-e2e');
+    if (dataE2e) return `[data-e2e="${attrEscape(dataE2e)}"]`;
+    const aria = element.getAttribute('aria-label');
+    if (aria) return `${element.tagName.toLowerCase()}[aria-label="${attrEscape(aria)}"]`;
+    const parts = [];
+    let node = element;
+    while (node && node instanceof Element && parts.length < 4) {
+      let part = node.tagName.toLowerCase();
+      const cls = Array.from(node.classList || []).filter(Boolean).slice(0, 2);
+      if (cls.length) part += '.' + cls.map((name) => cssEscape(name)).join('.');
+      const parent = node.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children).filter((child) => child.tagName === node.tagName);
+        if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+      }
+      parts.unshift(part);
+      node = parent;
+    }
+    return parts.join(' > ');
+  };
+  const describe = (element) => {
+    if (!element || !(element instanceof Element)) return null;
+    const rect = element.getBoundingClientRect();
+    const inputValue = ['INPUT', 'TEXTAREA'].includes(element.tagName) ? element.value : '';
+    return {
+      tag: element.tagName.toLowerCase(),
+      role: compact(element.getAttribute('role'), 60),
+      text: compact(element.innerText || element.textContent || inputValue, 180),
+      ariaLabel: compact(element.getAttribute('aria-label'), 140),
+      title: compact(element.getAttribute('title'), 140),
+      placeholder: compact(element.getAttribute('placeholder'), 140),
+      dataE2e: compact(element.getAttribute('data-e2e'), 100),
+      type: compact(element.getAttribute('type'), 40),
+      href: compact(element.getAttribute('href'), 180),
+      selector: cssPath(element),
+      rect: {
+        x: Math.round(rect.x), y: Math.round(rect.y),
+        width: Math.round(rect.width), height: Math.round(rect.height)
+      }
+    };
+  };
+  const x = Math.round((window.innerWidth || 1) * __NORM_X__ / 1000);
+  const y = Math.round((window.innerHeight || 1) * __NORM_Y__ / 1000);
+  const element = document.elementFromPoint(x, y);
+  if (!element) {
+    return {
+      ok: false,
+      reason: 'no_element',
+      point: { x, y, normalizedX: __NORM_X__, normalizedY: __NORM_Y__ },
+      viewport: { width: window.innerWidth, height: window.innerHeight }
+    };
+  }
+  const target = element.closest('button,a,[role="button"],[role="link"],input,textarea,select,[contenteditable="true"],[data-e2e],[aria-label]') || element;
+  const ancestors = [];
+  let node = element.parentElement;
+  while (node && ancestors.length < 3) {
+    ancestors.push(describe(node));
+    node = node.parentElement;
+  }
+  const targetTag = target && target.tagName ? target.tagName.toLowerCase() : '';
+  const actionable = Boolean(target && target.matches('button,a,[role="button"],[role="link"],input,textarea,select,[contenteditable="true"],[data-e2e],[aria-label]'));
+  return {
+    ok: true,
+    point: { x, y, normalizedX: __NORM_X__, normalizedY: __NORM_Y__ },
+    viewport: { width: window.innerWidth, height: window.innerHeight },
+    actionable,
+    element: describe(element),
+    target: describe(target),
+    targetTag,
+    ancestors: ancestors.filter(Boolean)
+  };
+}"""
+        js = js.replace("__NORM_X__", str(norm_x)).replace("__NORM_Y__", str(norm_y))
+        result = self.playwright_mcp.call_tool("browser_evaluate", {"function": js})
+        if result.get("is_error"):
+            raise RuntimeError(str(result.get("text") or "Playwright MCP hit test failed.").strip())
+        parsed = _parse_browser_evaluate_result(str(result.get("text_raw") or result.get("text") or ""))
+        if not isinstance(parsed, dict):
+            raise RuntimeError(f"Hit test returned invalid payload: {parsed}")
+        parsed["target_description"] = str(target_description or "").strip()
+        return parsed
+
+    def _playwright_mcp_scroll(self, delta_y: Any) -> dict[str, Any]:
+        try:
+            amount = int(float(delta_y))
+        except Exception as exc:
+            raise ValueError("Visual scroll requires numeric delta_y.") from exc
+        amount = max(-5000, min(amount, 5000))
+        js = (
+            "() => { "
+            f"window.scrollBy({{ top: {amount}, left: 0, behavior: 'instant' }}); "
+            "return { ok: true, scrollY: Math.round(window.scrollY), deltaY: "
+            f"{amount}"
+            " }; }"
+        )
+        result = self.playwright_mcp.call_tool("browser_evaluate", {"function": js})
+        if result.get("is_error"):
+            raise RuntimeError(str(result.get("text") or "Playwright MCP scroll failed.").strip())
+        parsed = _parse_browser_evaluate_result(str(result.get("text_raw") or result.get("text") or ""))
+        return parsed if isinstance(parsed, dict) else {"ok": True, "result": parsed}
+
+    def _playwright_mcp_type_text(self, text: str) -> dict[str, Any]:
+        content = str(text or "")
+        if not content:
+            return {"ok": True, "typed": 0}
+        type_error = ""
+        try:
+            result = self.playwright_mcp.call_tool("browser_type", {"text": content})
+        except Exception as exc:
+            result = {"is_error": True, "text": str(exc)}
+        if not result.get("is_error"):
+            return {"ok": True, "typed": len(content), "backend": "browser_type"}
+        type_error = str(result.get("text") or "").strip()
+        js = (
+            "() => { "
+            f"const value = {_json_string(content)}; "
+            "const element = document.activeElement; "
+            "if (!element) return { ok: false, reason: 'no_active_element' }; "
+            "if ('value' in element) { "
+            "  const start = element.selectionStart ?? element.value.length; "
+            "  const end = element.selectionEnd ?? element.value.length; "
+            "  element.value = element.value.slice(0, start) + value + element.value.slice(end); "
+            "  element.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' })); "
+            "  element.dispatchEvent(new Event('change', { bubbles: true })); "
+            "  return { ok: true, tag: element.tagName }; "
+            "} "
+            "if (element.isContentEditable) { document.execCommand('insertText', false, value); return { ok: true, tag: element.tagName }; } "
+            "return { ok: false, reason: 'active_element_not_editable', tag: element.tagName }; "
+            "}"
+        )
+        fallback = self.playwright_mcp.call_tool("browser_evaluate", {"function": js})
+        if fallback.get("is_error"):
+            raise RuntimeError(str(type_error or fallback.get("text") or "Playwright MCP type failed.").strip())
+        parsed = _parse_browser_evaluate_result(str(fallback.get("text_raw") or fallback.get("text") or ""))
+        if isinstance(parsed, dict) and parsed.get("ok") is True:
+            return {"ok": True, "typed": len(content), "backend": "evaluate"}
+        raise RuntimeError(f"Type text failed: {parsed}")
+
+    def playwright_mcp_visual_action(self, payload: dict[str, Any]) -> dict[str, Any]:
+        action = str(payload.get("action") or "").strip().lower()
+        wait_after = max(0, min(int(payload.get("wait_ms") or 800), 30000))
+        result: dict[str, Any]
+        if action in {"click", "click_xy"}:
+            result = self._playwright_mcp_click_normalised(payload.get("x"), payload.get("y"))
+        elif action == "scroll":
+            delta_y = payload.get("delta_y")
+            if delta_y is None:
+                direction = str(payload.get("direction") or "down").strip().lower()
+                delta_y = -700 if direction in {"up", "backward"} else 700
+            result = self._playwright_mcp_scroll(delta_y)
+        elif action in {"press", "key"}:
+            key = str(payload.get("key") or "").strip()
+            if not key:
+                raise ValueError("Visual press action requires key.")
+            press_result = self.playwright_mcp.call_tool("browser_press_key", {"key": key})
+            if press_result.get("is_error"):
+                raise RuntimeError(str(press_result.get("text") or "Playwright MCP browser_press_key failed.").strip())
+            result = {"ok": True, "key": key}
+        elif action in {"type", "type_text"}:
+            result = self._playwright_mcp_type_text(str(payload.get("text") or ""))
+        elif action == "wait":
+            result = {"ok": True, "wait_ms": wait_after}
+        else:
+            raise ValueError(f"Unsupported visual action: {action or '<empty>'}")
+
+        if wait_after > 0:
+            self._playwright_mcp_wait(wait_after)
+        diagnostics = self._playwright_mcp_page_diagnostics() if _browser_diagnostics_enabled() else {}
+        return {
+            "ok": True,
+            "action": action,
+            "result": result,
+            "diagnostics": diagnostics,
         }
-
-        def backend_label(result: dict[str, Any]) -> str:
-            return str(result.get("backend") or "").strip()
-
-        try:
-            if not keyword:
-                raise ValueError("keyword is required")
-            if not steps:
-                raise ValueError("steps are required")
-
-            lowered_keyword = keyword.lower()
-            current_url = url
-            current_page_index = payload.get("page_index")
-            if current_page_index is not None:
-                current_page_index = int(current_page_index)
-            for index in range(rounds):
-                if job.cancel_requested:
-                    job.status = "cancelled"
-                    self._append_job_progress(job, "Job cancelled.")
-                    job.result = "Job cancelled."
-                    return
-
-                result = self.interact_prefer_mcp_readonly(
-                    current_url,
-                    instruction=keyword,
-                    steps=steps,
-                    wait_ms=wait_ms,
-                    page_index=current_page_index,
-                )
-                current_url = ""
-                next_page_index = result.get("page_index")
-                if next_page_index is not None:
-                    current_page_index = int(next_page_index)
-
-                extracts = result.get("extracts") or []
-                snapshot_text = str(result.get("text") or "").strip()
-                extract_parts: list[str] = []
-                for item in extracts:
-                    name = str(item.get("name") or "").strip()
-                    text = str(item.get("text") or "").strip()
-                    if not text:
-                        continue
-                    if not match_extract_names or name in match_extract_names:
-                        extract_parts.append(text)
-                searched_text = "\n".join(extract_parts or [snapshot_text]).strip()
-                preview = searched_text[:240] or snapshot_text[:240] or "[No text extracted]"
-                result_backend = backend_label(result)
-                round_prefix = f"Round {index + 1}"
-                if result_backend:
-                    round_prefix += f" [{result_backend}]"
-                self._append_job_progress(job, f"{round_prefix}: {preview}")
-
-                if lowered_keyword in searched_text.lower():
-                    job.status = "completed"
-                    job.result = json.dumps(
-                        {
-                            "matched_keyword": keyword,
-                            "url": result.get("url", ""),
-                            "title": result.get("title", ""),
-                            "backend": str(result.get("backend") or ""),
-                            "extracts": extracts,
-                            "text": snapshot_text[:3000],
-                        },
-                        ensure_ascii=False,
-                    )
-                    self._append_job_progress(job, f"Matched keyword: {keyword}")
-                    return
-
-                if index < rounds - 1:
-                    if advance_steps:
-                        try:
-                            advance_result = self.interact_prefer_mcp_readonly(
-                                "",
-                                instruction="advance",
-                                steps=advance_steps,
-                                wait_ms=500,
-                                page_index=current_page_index,
-                            )
-                            next_page_index = advance_result.get("page_index")
-                            if next_page_index is not None:
-                                current_page_index = int(next_page_index)
-                            advance_text = str(advance_result.get("text") or "").strip()
-                            if advance_text:
-                                advance_backend = backend_label(advance_result)
-                                advance_prefix = "Advance"
-                                if advance_backend:
-                                    advance_prefix += f" [{advance_backend}]"
-                                self._append_job_progress(job, f"{advance_prefix}: {advance_text[:160]}")
-                        except Exception as exc:
-                            self._append_job_progress(job, f"Advance failed: {exc}")
-                    time.sleep(interval_sec)
-
-            job.status = "completed"
-            job.result = f"Keyword not found: {keyword}"
-            self._append_job_progress(job, f"Keyword not found: {keyword}")
-        except Exception as exc:
-            job.status = "failed"
-            job.error = str(exc)
-            self._append_job_progress(job, f"Execution failed: {exc}")
-
-    def get_job(self, job_id: str) -> dict[str, Any] | None:
-        with self._jobs_lock:
-            job = self._jobs.get(job_id)
-            return job.to_dict() if job else None
-
-    def cancel_job(self, job_id: str) -> dict[str, Any] | None:
-        with self._jobs_lock:
-            job = self._jobs.get(job_id)
-            if not job:
-                return None
-            job.cancel_requested = True
-            if job.status == "running":
-                job.status = "cancelling"
-            self._append_job_progress(job, "Cancellation requested.")
-            return job.to_dict()
 
     def start_worker_client(self) -> None:
         if not self.worker_enabled or not self.worker_ws_url:
@@ -1399,7 +1216,14 @@ class BrowserBridge:
                         "worker_id": self.worker_id,
                         "token": self.worker_token,
                         "profile_path": str(self.user_data_dir),
-                        "capabilities": ["browser.tabs", "browser.navigate", "browser.snapshot", "browser.interact"],
+                        "capabilities": [
+                            "browser.tabs",
+                            "browser.navigate",
+                            "browser.snapshot",
+                            "browser.screenshot",
+                            "browser.hit_test",
+                            "browser.visual_action",
+                        ],
                     },
                     ensure_ascii=False,
                 )
@@ -1443,174 +1267,16 @@ class BrowserBridge:
 bridge = BrowserBridge()
 
 
-class BrowserBridgeHandler(BaseHTTPRequestHandler):
-    server_version = "WeiBrowserBridge/0.3"
-
-    def do_GET(self) -> None:
-        try:
-            self._authorize()
-            if self.path == "/health":
-                self._send_json(
-                    HTTPStatus.OK,
-                    {
-                        "status": "ok",
-                        "playwright_mcp": bridge.playwright_mcp_status(),
-                        "browser_worker": bridge.worker_status(),
-                        "host": bridge.host,
-                        "port": bridge.port,
-                    },
-                )
-                return
-
-            if self.path == "/mcp/status":
-                self._send_json(HTTPStatus.OK, bridge.playwright_mcp_status(ensure_started=True))
-                return
-
-            if self.path == "/mcp/tools":
-                self._send_json(HTTPStatus.OK, bridge.playwright_mcp_tools())
-                return
-
-            if self.path == "/mcp/tabs":
-                self._send_json(HTTPStatus.OK, bridge.playwright_mcp_tabs())
-                return
-
-            job_id = self._extract_job_id()
-            if job_id:
-                job = bridge.get_job(job_id)
-                if not job:
-                    self._send_json(HTTPStatus.NOT_FOUND, {"detail": "Job not found."})
-                    return
-                self._send_json(HTTPStatus.OK, job)
-                return
-
-            self._send_json(HTTPStatus.NOT_FOUND, {"detail": "Not found."})
-        except Exception as exc:
-            self._send_error_json(exc)
-
-    def do_POST(self) -> None:
-        try:
-            self._authorize()
-            payload = self._read_json()
-
-            if self.path == "/jobs/start":
-                result = bridge.start_job(payload)
-                self._send_json(HTTPStatus.OK, result)
-                return
-
-            if self.path == "/mcp/restart":
-                result = bridge.restart_playwright_mcp()
-                self._send_json(HTTPStatus.OK, result)
-                return
-
-            if self.path == "/mcp/navigate":
-                result = bridge.playwright_mcp_navigate(str(payload.get("url") or "").strip())
-                self._send_json(HTTPStatus.OK, result)
-                return
-
-            if self.path == "/mcp/snapshot":
-                result = bridge.playwright_mcp_snapshot(
-                    url=str(payload.get("url") or "").strip(),
-                    instruction=str(payload.get("instruction") or "").strip(),
-                    wait_ms=int(payload.get("wait_ms") or 3000),
-                    target=str(payload.get("target") or "").strip(),
-                    depth=int(payload["depth"]) if payload.get("depth") is not None else None,
-                )
-                self._send_json(HTTPStatus.OK, result)
-                return
-
-            if self.path == "/mcp/interact":
-                result = bridge.interact_prefer_mcp_readonly(
-                    url=str(payload.get("url") or "").strip(),
-                    instruction=str(payload.get("instruction") or "").strip(),
-                    steps=payload.get("steps") if isinstance(payload.get("steps"), list) else [],
-                    wait_ms=int(payload.get("wait_ms") or 1000),
-                )
-                self._send_json(HTTPStatus.OK, result)
-                return
-
-            job_id = self._extract_job_id(suffix="/cancel")
-            if job_id:
-                job = bridge.cancel_job(job_id)
-                if not job:
-                    self._send_json(HTTPStatus.NOT_FOUND, {"detail": "Job not found."})
-                    return
-                self._send_json(HTTPStatus.OK, job)
-                return
-
-            self._send_json(HTTPStatus.NOT_FOUND, {"detail": "Not found."})
-        except Exception as exc:
-            self._send_error_json(exc)
-
-    def _extract_job_id(self, suffix: str = "") -> str | None:
-        prefix = "/jobs/"
-        if not self.path.startswith(prefix):
-            return None
-        tail = self.path[len(prefix) :]
-        if suffix:
-            if not tail.endswith(suffix):
-                return None
-            tail = tail[: -len(suffix)]
-        if not tail or "/" in tail.strip("/"):
-            return None
-        return tail.strip("/")
-
-    def _authorize(self) -> None:
-        if not bridge.token:
-            return
-        auth = self.headers.get("Authorization", "").strip()
-        expected = f"Bearer {bridge.token}"
-        if auth != expected:
-            raise PermissionError("Unauthorized")
-
-    def _read_json(self) -> dict[str, Any]:
-        content_length = int(self.headers.get("Content-Length", "0") or "0")
-        if content_length <= 0:
-            return {}
-        raw = self.rfile.read(content_length)
-        if not raw:
-            return {}
-        return json.loads(raw.decode("utf-8"))
-
-    def _send_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
-        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status.value)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
-
-    def _send_error_json(self, exc: Exception) -> None:
-        detail = _friendly_bridge_error_message(str(exc))
-        if isinstance(exc, PermissionError):
-            self._send_json(HTTPStatus.UNAUTHORIZED, {"detail": detail})
-            return
-        if isinstance(exc, FileNotFoundError):
-            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"detail": detail})
-            return
-        if isinstance(exc, ValueError):
-            self._send_json(HTTPStatus.BAD_REQUEST, {"detail": detail})
-            return
-        if isinstance(exc, subprocess.TimeoutExpired):
-            self._send_json(HTTPStatus.GATEWAY_TIMEOUT, {"detail": detail})
-            return
-        self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"detail": detail})
-
-    def log_message(self, format: str, *args: Any) -> None:
-        return
-
-
 def main() -> int:
     bridge.start_worker_client()
-    server = ThreadingHTTPServer((bridge.host, bridge.port), BrowserBridgeHandler)
-    print(f"Browser Bridge listening on http://{bridge.host}:{bridge.port}")
+    if not bridge.worker_enabled or not bridge.worker_ws_url:
+        raise RuntimeError("Browser Worker requires BROWSER_WORKER_ENABLED=true and BROWSER_WORKER_WS_URL.")
+    print("Local Thin Browser Worker started in websocket-only mode.")
     print(f"User data dir: {bridge.user_data_dir}")
     print(f"Playwright MCP command: {bridge.playwright_mcp.command}")
     print(f"Browser worker: {bridge.worker_status()}")
-    if bridge.token:
-        print("Auth token: configured")
-    else:
-        print("Auth token: not configured")
-    server.serve_forever()
+    while True:
+        time.sleep(3600)
     return 0
 
 

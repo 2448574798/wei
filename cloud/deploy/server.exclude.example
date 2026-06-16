@@ -1,41 +1,38 @@
 # Server-only Git exclude rules
 #
-# Usage on the server:
-#   cp deploy/server.exclude.example .git/info/exclude
+# Usage from the repository root on the server:
+#   cp cloud/deploy/server.exclude.example .git/info/exclude
 #
 # This file is for untracked runtime data and local machine artifacts only.
 # Tracked paths such as local_launcher/ will still be pulled by git clone/pull.
 
-# environment
-.env
-venv/
-.venv/
+# cloud environment
+cloud/.env
+cloud/venv/
+cloud/.venv/
 
 # python cache
 __pycache__/
 *.pyc
 
 # runtime logs
-logs/
+cloud/logs/
 *.log
-ssh_tunnel*.log
 uvicorn_local*.log
 
 # app runtime data
-data/
-searxng-data/
-tmp/
+cloud/data/
+cloud/tmp/
 
 # local browser/runtime artifacts
-.playwright-mcp/
+cloud/.playwright-mcp/
 local_launcher/.env
+local_launcher/launcher_config.json
 local_launcher/runtime_env.local
 local_launcher/launcher_logs/
 local_launcher/.playwright-mcp/
 
 # server-downloaded binaries / archives
-frp_*/
-frp_*.tar.gz
 
 # editor / OS noise
 .vscode/

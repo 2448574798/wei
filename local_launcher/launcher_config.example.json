@@ -1,44 +1,9 @@
 {
   "processes": [
     {
-      "name": "frpc",
+      "name": "local_thin_browser_worker",
       "enabled": true,
       "kill_ports": [],
-      "command": [
-        "{APP_DIR}\\bin\\frpc.exe",
-        "-c",
-        "{APP_DIR}\\bin\\frpc.toml"
-      ],
-      "cwd": "{APP_DIR}",
-      "env": {},
-      "restart_on_exit": true,
-      "restart_delay_sec": 2,
-      "max_restart_count": 20,
-      "ready_url": "",
-      "ready_timeout_sec": 0
-    },
-    {
-      "name": "open_interpreter",
-      "enabled": true,
-      "kill_ports": [18000],
-      "command": [
-        "{APP_DIR}\\bin\\open-interpreter-server.exe"
-      ],
-      "cwd": "{APP_DIR}",
-      "env": {
-        "OPEN_INTERPRETER_PORT": "18000",
-        "OPEN_INTERPRETER_HOST": "127.0.0.1"
-      },
-      "restart_on_exit": true,
-      "restart_delay_sec": 2,
-      "max_restart_count": 20,
-      "ready_url": "http://127.0.0.1:18000",
-      "ready_timeout_sec": 30
-    },
-    {
-      "name": "browser_bridge",
-      "enabled": true,
-      "kill_ports": [18100],
       "command": [
         "%PLAYWRIGHT_PYTHON_EXE%",
         "{APP_DIR}\\browser_bridge.py"
@@ -48,11 +13,8 @@
       "restart_on_exit": true,
       "restart_delay_sec": 2,
       "max_restart_count": 20,
-      "ready_headers": {
-        "Authorization": "Bearer %BROWSER_BRIDGE_TOKEN%"
-      },
-      "ready_url": "http://127.0.0.1:18100/health",
-      "ready_timeout_sec": 30
+      "ready_url": "",
+      "ready_timeout_sec": 0
     }
   ]
 }
