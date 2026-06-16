@@ -812,37 +812,37 @@ def static_file_response(filename: str, media_type: str | None = None) -> FileRe
     return FileResponse(path, media_type=media_type)
 
 
-@app.get("/", include_in_schema=False)
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 async def serve_index():
     return static_file_response("index.html", "text/html")
 
 
-@app.get("/index.html", include_in_schema=False)
+@app.api_route("/index.html", methods=["GET", "HEAD"], include_in_schema=False)
 async def serve_index_html():
     return static_file_response("index.html", "text/html")
 
 
-@app.get("/login", include_in_schema=False)
+@app.api_route("/login", methods=["GET", "HEAD"], include_in_schema=False)
 async def serve_login():
     return static_file_response("login.html", "text/html")
 
 
-@app.get("/login.html", include_in_schema=False)
+@app.api_route("/login.html", methods=["GET", "HEAD"], include_in_schema=False)
 async def serve_login_html():
     return static_file_response("login.html", "text/html")
 
 
-@app.get("/app.js", include_in_schema=False)
+@app.api_route("/app.js", methods=["GET", "HEAD"], include_in_schema=False)
 async def serve_app_js():
     return static_file_response("app.js", "application/javascript")
 
 
-@app.get("/styles.css", include_in_schema=False)
+@app.api_route("/styles.css", methods=["GET", "HEAD"], include_in_schema=False)
 async def serve_styles_css():
     return static_file_response("styles.css", "text/css")
 
 
-@app.get("/favicon.svg", include_in_schema=False)
+@app.api_route("/favicon.svg", methods=["GET", "HEAD"], include_in_schema=False)
 async def serve_favicon_svg():
     return static_file_response("favicon.svg", "image/svg+xml")
 
