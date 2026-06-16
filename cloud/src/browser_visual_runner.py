@@ -159,7 +159,7 @@ def _hit_test_text_chunks(hit_test: dict) -> list[str]:
     containers.extend(item for item in ancestors[:2] if isinstance(item, dict))
 
     for item in containers:
-        for key in ("text", "ariaLabel", "title", "placeholder", "dataE2e", "href", "selector", "role", "tag", "type"):
+        for key in ("text", "ariaLabel", "title", "placeholder", "dataE2e", "href", "selector", "className", "role", "tag", "type"):
             value = str(item.get(key) or "").strip()
             if value:
                 chunks.append(value)
@@ -207,6 +207,23 @@ def click_hit_test_match_score(target_description: str, hit_test: dict) -> float
     return len(expected & observed) / max(1, len(expected))
 
 
+def _is_generic_video_card_target(target_description: str) -> bool:
+    text = str(target_description or "").lower()
+    return any(keyword in text for keyword in ("video", "card", "thumbnail", "cover", "feed", "视频", "卡片", "封面", "播放"))
+
+
+def _hit_test_looks_like_video_card(hit_test: dict) -> bool:
+    chunks = " ".join(_hit_test_text_chunks(hit_test)).lower()
+    if any(keyword in chunks for keyword in ("video", "card", "thumbnail", "cover", "feed", "waterfall", "douyin")):
+        return True
+    # Many video cards expose only duration/view-count text at the exact hit point.
+    if re.search(r"\b\d{1,2}:\d{2}\b", chunks):
+        return True
+    if re.search(r"\d+(?:\.\d+)?\s*(?:万|w|k)\b", chunks):
+        return True
+    return False
+
+
 def format_click_hit_test_summary(hit_test: dict) -> str:
     if not isinstance(hit_test, dict):
         return "invalid hit-test payload"
@@ -247,6 +264,8 @@ def click_hit_test_safety_issue(action: dict, hit_test: dict) -> tuple[str, floa
     expected_tokens = _match_tokens(target_description)
     score = click_hit_test_match_score(target_description, hit_test)
     confidence = float(action.get("confidence") or 0.0)
+    if _is_generic_video_card_target(target_description) and _hit_test_looks_like_video_card(hit_test):
+        return "", max(score, BROWSER_VISUAL_CLICK_PREFLIGHT_MIN_SCORE)
     if expected_tokens and readable and score < BROWSER_VISUAL_CLICK_PREFLIGHT_MIN_SCORE and confidence < 0.85:
         return (
             f"hit-test target mismatch score {score:.2f} < {BROWSER_VISUAL_CLICK_PREFLIGHT_MIN_SCORE:.2f}",

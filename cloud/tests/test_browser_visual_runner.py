@@ -169,6 +169,39 @@ class BrowserVisualRunnerTests(unittest.TestCase):
 
         self.assertEqual(issue, "")
 
+    def test_click_hit_test_allows_video_card_metadata_hit(self) -> None:
+        action = {
+            "action": "click",
+            "confidence": 0.72,
+            "target_description": "first video card with title 地球之肺亚马逊雨林",
+        }
+        hit_test = {
+            "ok": True,
+            "actionable": False,
+            "target": {
+                "tag": "div",
+                "text": "05:13 1.5万",
+                "selector": "div.t73oY2Aa.Fiub_RNJ > div.Ua9Qmm8U > div.RnRWkAg2",
+                "className": "RnRWkAg2",
+            },
+            "ancestors": [
+                {
+                    "tag": "div",
+                    "className": "waterfall-videoCardContainer jingxuanVideoCard",
+                    "selector": "div.waterfall-videoCardContainer.jingxuanVideoCard",
+                }
+            ],
+        }
+
+        with (
+            mock.patch.object(runner, "BROWSER_VISUAL_CLICK_PREFLIGHT_ENABLED", True),
+            mock.patch.object(runner, "BROWSER_VISUAL_CLICK_PREFLIGHT_MIN_SCORE", 0.16),
+        ):
+            issue, score = runner.click_hit_test_safety_issue(action, hit_test)
+
+        self.assertEqual(issue, "")
+        self.assertGreaterEqual(score, 0.16)
+
     def test_visual_operation_records_model_no_action_failure(self) -> None:
         artifacts = []
         screenshot = {

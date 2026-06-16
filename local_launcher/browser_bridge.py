@@ -1237,6 +1237,7 @@ class BrowserBridge:
       title: compact(element.getAttribute('title'), 140),
       placeholder: compact(element.getAttribute('placeholder'), 140),
       dataE2e: compact(element.getAttribute('data-e2e'), 100),
+      className: compact(element.className, 180),
       type: compact(element.getAttribute('type'), 40),
       href: compact(element.getAttribute('href'), 180),
       selector: cssPath(element),
