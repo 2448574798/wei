@@ -11,6 +11,7 @@ import time
 from collections import deque
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect as websocket_connect
@@ -460,6 +461,19 @@ def _extract_current_tab(structured_tabs: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _is_blank_browser_url(url: str) -> bool:
+    value = str(url or "").strip().lower()
+    return not value or value in {"about:blank", "chrome://new-tab-page/", "edge://newtab/"}
+
+
+def _normalised_url_host(url: str) -> str:
+    try:
+        parsed = urlparse(str(url or "").strip())
+    except Exception:
+        return ""
+    return (parsed.hostname or "").lower().removeprefix("www.")
+
+
 def _compact_text(text: Any, limit: int) -> str:
     normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     normalized = re.sub(r"[ \t]+\n", "\n", normalized)
@@ -699,6 +713,51 @@ class BrowserBridge:
             "text": result.get("text", ""),
         }
 
+    def _current_tab_info(self) -> dict[str, Any]:
+        try:
+            tabs = self.playwright_mcp_tabs()
+        except Exception:
+            return {"tabs": {}, "current_tab": {}}
+        structured_tabs = tabs.get("structured_content") if isinstance(tabs.get("structured_content"), dict) else {}
+        return {"tabs": tabs, "current_tab": _extract_current_tab(structured_tabs)}
+
+    def _maybe_navigate_for_observation(self, target_url: str) -> dict[str, Any]:
+        requested_url = str(target_url or "").strip()
+        if not requested_url:
+            return {"mode": "reuse_current_page", "reason": "no_url_requested", "url": ""}
+
+        tab_info = self._current_tab_info()
+        current_tab = tab_info.get("current_tab") if isinstance(tab_info.get("current_tab"), dict) else {}
+        current_url = str(current_tab.get("url") or "").strip()
+        target_host = _normalised_url_host(requested_url)
+        current_host = _normalised_url_host(current_url)
+
+        if not _is_blank_browser_url(current_url) and current_host and target_host and current_host == target_host:
+            return {
+                "mode": "reuse_current_page",
+                "reason": "same_site",
+                "requested_url": requested_url,
+                "current_url": current_url,
+                "current_title": str(current_tab.get("title") or "").strip(),
+            }
+        if not _is_blank_browser_url(current_url) and current_url.rstrip("/") == requested_url.rstrip("/"):
+            return {
+                "mode": "reuse_current_page",
+                "reason": "same_url",
+                "requested_url": requested_url,
+                "current_url": current_url,
+                "current_title": str(current_tab.get("title") or "").strip(),
+            }
+
+        navigated = self.playwright_mcp_navigate(requested_url)
+        return {
+            "mode": "navigated",
+            "reason": "blank_or_different_site",
+            "requested_url": requested_url,
+            "current_url": str(navigated.get("url") or requested_url).strip(),
+            "current_title": str(navigated.get("title") or "").strip(),
+        }
+
     def _playwright_mcp_wait(self, wait_ms: int) -> None:
         wait_seconds = max(0.0, min(float(wait_ms) / 1000.0, 30.0))
         if wait_seconds <= 0:
@@ -827,8 +886,7 @@ class BrowserBridge:
         depth: int | None = None,
     ) -> dict[str, Any]:
         target_url = str(url or "").strip()
-        if target_url:
-            self.playwright_mcp_navigate(target_url)
+        navigation = self._maybe_navigate_for_observation(target_url)
 
         wait_seconds = max(0.0, min(float(wait_ms) / 1000.0, 30.0))
         if wait_seconds > 0:
@@ -859,6 +917,7 @@ class BrowserBridge:
             "instruction": str(instruction or "").strip(),
             "text": snapshot_text,
             "diagnostics": diagnostics,
+            "navigation": navigation,
             "tool_result": result,
             "tabs": tabs,
         }
@@ -871,8 +930,7 @@ class BrowserBridge:
         wait_ms: int = 1000,
     ) -> dict[str, Any]:
         target_url = str(url or "").strip()
-        if target_url:
-            self.playwright_mcp_navigate(target_url)
+        navigation = self._maybe_navigate_for_observation(target_url)
         if wait_ms > 0:
             self._playwright_mcp_wait(wait_ms)
 
@@ -913,6 +971,7 @@ class BrowserBridge:
             "image_base64_length": int(image.get("base64_length") or len(str(image.get("data") or ""))),
             "original_image_base64_length": int(image.get("original_base64_length") or 0),
             "diagnostics": diagnostics,
+            "navigation": navigation,
             "tabs": tabs,
         }
 

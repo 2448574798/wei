@@ -119,6 +119,7 @@ def compact_visual_screenshot(payload: dict, *, include_image: bool = True) -> d
         "mime_type": str(payload.get("mime_type") or "image/png").strip() or "image/png",
         "image_optimized": bool(payload.get("image_optimized")),
         "image_base64_length": image_length,
+        "navigation": payload.get("navigation") if isinstance(payload.get("navigation"), dict) else {},
         "diagnostics": format_browser_diagnostics(payload, max_controls=8),
     }
     if include_image and BROWSER_VISUAL_TRACE_SCREENSHOTS and image_base64:
@@ -535,7 +536,7 @@ def run_local_browser_visual_operation(
             optimized = "optimized" if screenshot.get("image_optimized") else "raw"
             progress_callback(
                 f"Round {round_index}: screenshot captured [{optimized}, {screenshot_size} base64 chars], "
-                f"title={current_title or '-'}"
+                f"title={current_title or '-'}; navigation={screenshot.get('navigation', {}).get('mode', '-') if isinstance(screenshot.get('navigation'), dict) else '-'}"
             )
 
         try:
