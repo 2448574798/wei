@@ -323,6 +323,8 @@ def _call_browser_vision_model(*, instruction: str, screenshot: dict, round_inde
         "- Return at most one action unless typing immediately after focusing an input is clearly required.\n"
         f"- Every non-wait action must include target_description, expected_change, and confidence. Use confidence >= {BROWSER_VISION_ACTION_MIN_CONFIDENCE:.2f} only when the visible target is clear.\n"
         "- If the target is uncertain, do not click/type. Return wait, scroll, or need_user with a clear summary.\n"
+        "- On video-feed or card-grid pages, click the center of the intended visible video card/thumbnail, not a nearby icon or blank gutter. "
+        "Use target_description words such as video card or thumbnail when that is the intended target.\n"
         "- Prefer done when the requested result is already visible.\n"
         "- Use need_user for captcha, login approval, payment, purchase, irreversible posting, or ambiguous destructive actions.\n"
         "- Do not invent hidden page state. Use the screenshot first; use diagnostics only when present.\n\n"

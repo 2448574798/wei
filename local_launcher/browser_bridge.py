@@ -930,7 +930,152 @@ class BrowserBridge:
             "}"
         )
 
-    def _playwright_mcp_click_normalised(self, x: Any, y: Any) -> dict[str, Any]:
+    def _click_target_wants_dom_assist(self, target_description: str) -> bool:
+        text = str(target_description or "").strip().lower()
+        if not text:
+            return False
+        keywords = (
+            "video",
+            "card",
+            "thumbnail",
+            "cover",
+            "feed",
+            "open",
+            "enter",
+            "watch",
+            "视频",
+            "卡片",
+            "封面",
+            "进入",
+            "打开",
+            "播放",
+        )
+        return any(keyword in text for keyword in keywords)
+
+    def _playwright_mcp_dom_coordinate_click(self, css_x: int, css_y: int, *, target_description: str = "") -> dict[str, Any]:
+        js = r"""() => {
+  const compact = (value, max = 180) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+  const x = __CSS_X__;
+  const y = __CSS_Y__;
+  const element = document.elementFromPoint(x, y);
+  if (!element) return { ok: false, reason: 'no_element', x, y };
+
+  const viewportArea = Math.max(1, (window.innerWidth || 1) * (window.innerHeight || 1));
+  const candidateSelectors = [
+    'button',
+    'a',
+    '[role="button"]',
+    '[role="link"]',
+    'input',
+    'textarea',
+    'select',
+    '[contenteditable="true"]',
+    '[data-e2e]',
+    '[aria-label]',
+    '[class*="video" i]',
+    '[class*="card" i]',
+    '[class*="feed" i]',
+    '[class*="waterfall" i]',
+    '[data-e2e*="video" i]',
+    '[data-e2e*="card" i]'
+  ].join(',');
+
+  const describe = (node) => {
+    if (!node || !(node instanceof Element)) return null;
+    const rect = node.getBoundingClientRect();
+    return {
+      tag: node.tagName.toLowerCase(),
+      role: compact(node.getAttribute('role'), 60),
+      text: compact(node.innerText || node.textContent || '', 220),
+      ariaLabel: compact(node.getAttribute('aria-label'), 140),
+      title: compact(node.getAttribute('title'), 140),
+      dataE2e: compact(node.getAttribute('data-e2e'), 100),
+      className: compact(node.className, 180),
+      href: compact(node.getAttribute('href'), 180),
+      rect: {
+        x: Math.round(rect.x), y: Math.round(rect.y),
+        width: Math.round(rect.width), height: Math.round(rect.height)
+      }
+    };
+  };
+
+  const isGoodCandidate = (node) => {
+    if (!node || !(node instanceof Element)) return false;
+    const rect = node.getBoundingClientRect();
+    if (rect.width < 16 || rect.height < 16) return false;
+    if ((rect.width * rect.height) > viewportArea * 0.78) return false;
+    const style = window.getComputedStyle(node);
+    if (style && style.pointerEvents === 'none') return false;
+    return true;
+  };
+
+  let target = element.closest(candidateSelectors);
+  if (!isGoodCandidate(target)) {
+    target = null;
+    let node = element;
+    for (let depth = 0; node && depth < 6; depth += 1, node = node.parentElement) {
+      if (!(node instanceof Element)) continue;
+      const style = window.getComputedStyle(node);
+      const hasHandler = Boolean(node.onclick);
+      const looksClickable = style.cursor === 'pointer'
+        || node.getAttribute('role') === 'button'
+        || node.getAttribute('role') === 'link'
+        || node.hasAttribute('data-e2e')
+        || /video|card|feed|waterfall/i.test(String(node.className || ''));
+      if (looksClickable && isGoodCandidate(node)) {
+        target = node;
+        break;
+      }
+      if (hasHandler && isGoodCandidate(node)) {
+        target = node;
+        break;
+      }
+    }
+  }
+  if (!target) target = element;
+
+  const beforeUrl = location.href;
+  const beforeTitle = document.title;
+  try { target.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
+  const rect = target.getBoundingClientRect();
+  const clientX = Math.max(Math.round(rect.left + Math.min(Math.max(x - rect.left, 1), Math.max(rect.width - 1, 1))), 0);
+  const clientY = Math.max(Math.round(rect.top + Math.min(Math.max(y - rect.top, 1), Math.max(rect.height - 1, 1))), 0);
+  for (const type of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+    const event = type.startsWith('pointer')
+      ? new PointerEvent(type, { bubbles: true, cancelable: true, view: window, pointerId: 1, pointerType: 'mouse', isPrimary: true, clientX, clientY })
+      : new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX, clientY });
+    target.dispatchEvent(event);
+  }
+  if (typeof target.click === 'function') target.click();
+  return {
+    ok: true,
+    x,
+    y,
+    clientX,
+    clientY,
+    beforeUrl,
+    afterUrl: location.href,
+    beforeTitle,
+    afterTitle: document.title,
+    element: describe(element),
+    target: describe(target),
+    targetDescription: __TARGET_DESCRIPTION__
+  };
+}"""
+        js = (
+            js.replace("__CSS_X__", str(int(css_x)))
+            .replace("__CSS_Y__", str(int(css_y)))
+            .replace("__TARGET_DESCRIPTION__", _json_string(target_description))
+        )
+        click_result = self.playwright_mcp.call_tool("browser_evaluate", {"function": js})
+        if click_result.get("is_error"):
+            raise RuntimeError(str(click_result.get("text") or "Playwright MCP coordinate click failed.").strip())
+        parsed = _parse_browser_evaluate_result(str(click_result.get("text_raw") or click_result.get("text") or ""))
+        if isinstance(parsed, dict) and parsed.get("ok") is True:
+            return {"ok": True, "x": css_x, "y": css_y, "backend": "dom_dispatch", "target": parsed}
+        raise RuntimeError(f"Coordinate DOM click failed: {parsed}")
+
+    def _playwright_mcp_click_normalised(self, x: Any, y: Any, *, target_description: str = "") -> dict[str, Any]:
         point_result = self.playwright_mcp.call_tool("browser_evaluate", {"function": self._normalised_point_to_viewport_js(x, y)})
         if point_result.get("is_error"):
             raise RuntimeError(str(point_result.get("text") or "Playwright MCP browser_evaluate failed.").strip())
@@ -941,28 +1086,22 @@ class BrowserBridge:
         css_y = int(point.get("y") or 0)
         native_result = self._playwright_mcp_native_coordinate_click(css_x, css_y)
         if native_result.get("ok"):
+            if self._click_target_wants_dom_assist(target_description):
+                try:
+                    dom_result = self._playwright_mcp_dom_coordinate_click(css_x, css_y, target_description=target_description)
+                    return {
+                        **dom_result,
+                        "backend": "native_plus_dom_dispatch",
+                        "native": native_result,
+                    }
+                except Exception as exc:
+                    return {
+                        **native_result,
+                        "dom_assist_error": str(exc),
+                        "target_description": str(target_description or "").strip(),
+                    }
             return native_result
-        js = (
-            "() => { "
-            f"const x = {css_x}; const y = {css_y}; "
-            "const element = document.elementFromPoint(x, y); "
-            "if (!element) return { ok: false, reason: 'no_element', x, y }; "
-            "const target = element.closest('button,a,[role=\"button\"],[role=\"link\"],input,textarea,select,[contenteditable=\"true\"],[data-e2e]') || element; "
-            "target.scrollIntoView({ block: 'center', inline: 'center' }); "
-            "for (const type of ['pointerdown','mousedown','pointerup','mouseup','click']) { "
-            "  target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y })); "
-            "} "
-            "if (typeof target.click === 'function') target.click(); "
-            "return { ok: true, x, y, tag: target.tagName, text: (target.innerText || target.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 160) }; "
-            "}"
-        )
-        click_result = self.playwright_mcp.call_tool("browser_evaluate", {"function": js})
-        if click_result.get("is_error"):
-            raise RuntimeError(str(click_result.get("text") or "Playwright MCP coordinate click failed.").strip())
-        parsed = _parse_browser_evaluate_result(str(click_result.get("text_raw") or click_result.get("text") or ""))
-        if isinstance(parsed, dict) and parsed.get("ok") is True:
-            return {"ok": True, "x": css_x, "y": css_y, "backend": "dom_dispatch", "target": parsed}
-        raise RuntimeError(f"Coordinate click failed: {parsed}")
+        return self._playwright_mcp_dom_coordinate_click(css_x, css_y, target_description=target_description)
 
     def _playwright_mcp_native_coordinate_click(self, css_x: int, css_y: int) -> dict[str, Any]:
         candidates = [
@@ -1150,7 +1289,11 @@ class BrowserBridge:
         wait_after = max(0, min(int(payload.get("wait_ms") or 800), 30000))
         result: dict[str, Any]
         if action in {"click", "click_xy"}:
-            result = self._playwright_mcp_click_normalised(payload.get("x"), payload.get("y"))
+            result = self._playwright_mcp_click_normalised(
+                payload.get("x"),
+                payload.get("y"),
+                target_description=str(payload.get("target_description") or ""),
+            )
         elif action == "scroll":
             delta_y = payload.get("delta_y")
             if delta_y is None:
