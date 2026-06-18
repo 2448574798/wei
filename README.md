@@ -130,6 +130,7 @@ created
 - `verification_retry_limit`
 - `viewport_mismatch`
 - `dpr_coordinate_mismatch`
+- `page_state_mismatch`
 - `overlay_blocking_target`
 - `login_wall_blocking`
 - `page_refreshed_unexpectedly`

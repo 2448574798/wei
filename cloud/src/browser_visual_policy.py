@@ -52,6 +52,7 @@ class VisualActionSchema(BaseModel):
     wait_ms: int = 800
     x: int | None = None
     y: int | None = None
+    candidate_id: str | None = None
     delta_y: int | None = None
     direction: str | None = None
     key: str | None = None
@@ -116,6 +117,13 @@ class VisualActionSchema(BaseModel):
             return None
         return str(value).strip()[:80] or None
 
+    @field_validator("candidate_id", mode="before")
+    @classmethod
+    def _normalise_candidate_id(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        return _compact_text(value, 120) or None
+
     @field_validator("text", mode="before")
     @classmethod
     def _normalise_type_text(cls, value: Any) -> str | None:
@@ -126,8 +134,8 @@ class VisualActionSchema(BaseModel):
 
     @model_validator(mode="after")
     def _validate_action_contract(self) -> "VisualActionSchema":
-        if self.action in {"click", "click_xy"} and (self.x is None or self.y is None):
-            raise ValueError("click action requires x and y")
+        if self.action in {"click", "click_xy"} and not self.candidate_id and (self.x is None or self.y is None):
+            raise ValueError("click action requires x/y or candidate_id")
         if self.action == "scroll" and self.delta_y is None and not self.direction:
             self.direction = "down"
         if self.action in {"press", "key"} and not self.key:
@@ -145,7 +153,7 @@ class VisualActionSchema(BaseModel):
             "wait_ms": self.wait_ms,
             "confidence": self.confidence,
         }
-        for key in ("x", "y", "delta_y", "direction", "key", "text", "task_id", "action_id"):
+        for key in ("x", "y", "candidate_id", "delta_y", "direction", "key", "text", "task_id", "action_id"):
             value = getattr(self, key)
             if value not in (None, ""):
                 payload[key] = value
@@ -345,6 +353,49 @@ def _context_dpr_mismatch(context: dict) -> bool:
     return bool(values) and max(values) - min(values) > 0.05
 
 
+def _context_page_state_mismatch(context: dict) -> bool:
+    before = context.get("page_state_before") if isinstance(context.get("page_state_before"), dict) else {}
+    after = context.get("page_state_after") if isinstance(context.get("page_state_after"), dict) else {}
+    if not before or not after:
+        screenshot = context.get("screenshot") if isinstance(context.get("screenshot"), dict) else {}
+        hit_test = context.get("hit_test") if isinstance(context.get("hit_test"), dict) else {}
+        before = screenshot.get("page_state") if isinstance(screenshot.get("page_state"), dict) else before
+        after = hit_test.get("page_state") if isinstance(hit_test.get("page_state"), dict) else after
+    if not before or not after:
+        return False
+
+    before_url = str(before.get("url") or "").strip().split("#", 1)[0]
+    after_url = str(after.get("url") or "").strip().split("#", 1)[0]
+    if before_url and after_url and before_url != after_url:
+        return True
+
+    before_viewport = before.get("viewport") if isinstance(before.get("viewport"), dict) else {}
+    after_viewport = after.get("viewport") if isinstance(after.get("viewport"), dict) else {}
+    try:
+        width_diff = abs(int(before_viewport.get("width") or 0) - int(after_viewport.get("width") or 0))
+        height_diff = abs(int(before_viewport.get("height") or 0) - int(after_viewport.get("height") or 0))
+    except Exception:
+        width_diff = height_diff = 0
+    if width_diff > 24 or height_diff > 24:
+        return True
+
+    try:
+        before_dpr = float(before_viewport.get("devicePixelRatio") or before_viewport.get("dpr") or 1)
+        after_dpr = float(after_viewport.get("devicePixelRatio") or after_viewport.get("dpr") or 1)
+    except Exception:
+        before_dpr = after_dpr = 1.0
+    if abs(before_dpr - after_dpr) > 0.05:
+        return True
+
+    before_scroll = before.get("scroll") if isinstance(before.get("scroll"), dict) else {}
+    after_scroll = after.get("scroll") if isinstance(after.get("scroll"), dict) else {}
+    try:
+        scroll_diff = abs(int(before_scroll.get("y") or 0) - int(after_scroll.get("y") or 0))
+    except Exception:
+        scroll_diff = 0
+    return scroll_diff > 160
+
+
 def _context_page_refreshed(context: dict, reason_text: str) -> bool:
     combined = f"{reason_text} {_context_text(context)}"
     if any(marker in combined for marker in ("reload", "refreshed", "refresh", "重新加载", "刷新")):
@@ -365,6 +416,8 @@ def _context_page_refreshed(context: dict, reason_text: str) -> bool:
 
 def _classify_visual_context(source_name: str, reason_text: str, context: dict) -> tuple[str, str] | None:
     combined_text = f"{reason_text.lower()} {_context_text(context)}"
+    if _context_page_state_mismatch(context) or "page state mismatch" in combined_text:
+        return "page_state_mismatch", "Screenshot, snapshot, or hit-test came from a different page state."
     if _looks_like_login_wall(combined_text):
         return "login_wall_blocking", "Page is blocked by login/captcha/verification UI."
     if source_name in {"click_preflight", "verification"} and _looks_like_overlay(combined_text):

@@ -30,6 +30,7 @@ def _run_click_hit_test(action: dict) -> dict:
             "action_id": str(action.get("action_id") or "").strip(),
             "x": action.get("x"),
             "y": action.get("y"),
+            "candidate_id": str(action.get("candidate_id") or "").strip(),
             "target_description": str(action.get("target_description") or "").strip(),
         },
         timeout=max(15, min(get_browser_request_timeout(), 30)),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import os
@@ -706,6 +707,7 @@ class BrowserBridge:
             return self.playwright_mcp_hit_test(
                 x=data.get("x"),
                 y=data.get("y"),
+                candidate_id=str(data.get("candidate_id") or "").strip(),
                 target_description=str(data.get("target_description") or "").strip(),
                 task_id=str(data.get("task_id") or "").strip(),
                 action_id=str(data.get("action_id") or "").strip(),
@@ -907,6 +909,206 @@ class BrowserBridge:
         parsed["dialogCount"] = len(dialogs)
         return parsed
 
+    def _playwright_mcp_page_state(self) -> dict[str, Any]:
+        js = r"""() => {
+  const compact = (value, max = 4000) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+  return {
+    capturedAt: Date.now(),
+    readyState: document.readyState,
+    url: location.href,
+    title: document.title,
+    viewport: {
+      width: window.innerWidth || 0,
+      height: window.innerHeight || 0,
+      devicePixelRatio: window.devicePixelRatio || 1
+    },
+    scroll: {
+      x: Math.round(window.scrollX || 0),
+      y: Math.round(window.scrollY || 0),
+      height: Math.round(document.documentElement.scrollHeight || document.body?.scrollHeight || 0)
+    },
+    visibleText: compact(document.body ? document.body.innerText : '', 4000),
+    activeTag: document.activeElement && document.activeElement.tagName ? document.activeElement.tagName.toLowerCase() : ''
+  };
+}"""
+        try:
+            result = self.playwright_mcp.call_tool("browser_evaluate", {"function": js})
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        if result.get("is_error"):
+            return {"ok": False, "error": str(result.get("text") or "").strip()}
+        parsed = _parse_browser_evaluate_result(str(result.get("text_raw") or result.get("text") or ""))
+        if not isinstance(parsed, dict):
+            return {"ok": False, "raw": _compact_text(parsed, 500)}
+        visible_text = str(parsed.pop("visibleText", "") or "")
+        text_hash = hashlib.sha256(visible_text.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        url = str(parsed.get("url") or "").strip()
+        title = str(parsed.get("title") or "").strip()
+        viewport = parsed.get("viewport") if isinstance(parsed.get("viewport"), dict) else {}
+        scroll = parsed.get("scroll") if isinstance(parsed.get("scroll"), dict) else {}
+        signature_payload = {
+            "url": url,
+            "title": title,
+            "viewport": viewport,
+            "scroll": scroll,
+            "text_hash": text_hash,
+        }
+        parsed["ok"] = True
+        parsed["visibleTextHash"] = text_hash
+        parsed["visibleTextLength"] = len(visible_text)
+        parsed["visibleTextPreview"] = visible_text[:500]
+        parsed["signature"] = hashlib.sha256(
+            json.dumps(signature_payload, ensure_ascii=False, sort_keys=True).encode("utf-8", errors="ignore")
+        ).hexdigest()[:16]
+        return parsed
+
+    def _playwright_mcp_action_candidates(self, *, limit: int = 80) -> list[dict[str, Any]]:
+        js = r"""() => {
+  const compact = (value, max = 180) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+  const cssEscape = (value) => window.CSS && CSS.escape
+    ? CSS.escape(String(value || ''))
+    : String(value || '').replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char}`);
+  const attrEscape = (value) => String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const cssPath = (element) => {
+    if (!element || !(element instanceof Element)) return '';
+    if (element.id) return `#${cssEscape(element.id)}`;
+    const dataE2e = element.getAttribute('data-e2e');
+    if (dataE2e) return `[data-e2e="${attrEscape(dataE2e)}"]`;
+    const aria = element.getAttribute('aria-label');
+    if (aria) return `${element.tagName.toLowerCase()}[aria-label="${attrEscape(aria)}"]`;
+    const href = element.getAttribute('href');
+    if (href && element.tagName.toLowerCase() === 'a') return `a[href="${attrEscape(href)}"]`;
+    const parts = [];
+    let node = element;
+    while (node && node instanceof Element && parts.length < 5) {
+      let part = node.tagName.toLowerCase();
+      const cls = Array.from(node.classList || []).filter(Boolean).slice(0, 2);
+      if (cls.length) part += '.' + cls.map((name) => cssEscape(name)).join('.');
+      const parent = node.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children).filter((child) => child.tagName === node.tagName);
+        if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+      }
+      parts.unshift(part);
+      node = parent;
+    }
+    return parts.join(' > ');
+  };
+  const visible = (element) => {
+    if (!element || !(element instanceof Element)) return false;
+    const style = window.getComputedStyle(element);
+    if (!style || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+    if (style.pointerEvents === 'none') return false;
+    const rect = element.getBoundingClientRect();
+    return rect.width >= 12 && rect.height >= 12 && rect.bottom >= 0 && rect.right >= 0
+      && rect.top <= window.innerHeight && rect.left <= window.innerWidth;
+  };
+  const describe = (element) => {
+    const rect = element.getBoundingClientRect();
+    const centerX = Math.max(0, Math.min(window.innerWidth || 1, rect.left + rect.width / 2));
+    const centerY = Math.max(0, Math.min(window.innerHeight || 1, rect.top + rect.height / 2));
+    const text = compact(element.innerText || element.textContent || '', 220);
+    const ariaLabel = compact(element.getAttribute('aria-label'), 160);
+    const title = compact(element.getAttribute('title'), 160);
+    const dataE2e = compact(element.getAttribute('data-e2e'), 100);
+    const href = compact(element.getAttribute('href'), 220);
+    const label = compact(text || ariaLabel || title || dataE2e || href, 220);
+    const selector = cssPath(element);
+    return {
+      tag: element.tagName.toLowerCase(),
+      role: compact(element.getAttribute('role'), 60),
+      label,
+      text,
+      ariaLabel,
+      title,
+      dataE2e,
+      href,
+      selector,
+      className: compact(element.className, 160),
+      rect: {
+        x: Math.round(rect.x), y: Math.round(rect.y),
+        width: Math.round(rect.width), height: Math.round(rect.height)
+      },
+      center: {
+        x: Math.round(centerX),
+        y: Math.round(centerY),
+        normalizedX: Math.round(centerX * 1000 / Math.max(1, window.innerWidth || 1)),
+        normalizedY: Math.round(centerY * 1000 / Math.max(1, window.innerHeight || 1))
+      },
+      viewport: { width: window.innerWidth || 0, height: window.innerHeight || 0 }
+    };
+  };
+  const selectors = [
+    'button',
+    'a[href]',
+    '[role="button"]',
+    '[role="link"]',
+    'input',
+    'textarea',
+    'select',
+    '[contenteditable="true"]',
+    '[aria-label]',
+    '[data-e2e]',
+    '[class*="video" i]',
+    '[class*="card" i]',
+    '[class*="feed" i]',
+    '[class*="waterfall" i]',
+    '[class*="item" i]'
+  ].join(',');
+  const seen = new Set();
+  const candidates = [];
+  for (const element of Array.from(document.querySelectorAll(selectors))) {
+    if (!visible(element)) continue;
+    const item = describe(element);
+    const area = item.rect.width * item.rect.height;
+    if (area < 144) continue;
+    if (area > Math.max(1, (window.innerWidth || 1) * (window.innerHeight || 1)) * 0.82) continue;
+    const key = `${item.selector}|${item.rect.x},${item.rect.y},${item.rect.width},${item.rect.height}|${item.label}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    candidates.push(item);
+  }
+  return candidates.slice(0, __LIMIT__);
+}"""
+        js = js.replace("__LIMIT__", str(max(1, min(int(limit or 80), 160))))
+        try:
+            result = self.playwright_mcp.call_tool("browser_evaluate", {"function": js})
+        except Exception:
+            return []
+        if result.get("is_error"):
+            return []
+        parsed = _parse_browser_evaluate_result(str(result.get("text_raw") or result.get("text") or ""))
+        if not isinstance(parsed, list):
+            return []
+        items: list[dict[str, Any]] = []
+        for index, raw_item in enumerate(parsed[: max(1, min(int(limit or 80), 160))], start=1):
+            if not isinstance(raw_item, dict):
+                continue
+            signature_payload = {
+                "selector": str(raw_item.get("selector") or ""),
+                "label": str(raw_item.get("label") or ""),
+                "rect": raw_item.get("rect") if isinstance(raw_item.get("rect"), dict) else {},
+                "center": raw_item.get("center") if isinstance(raw_item.get("center"), dict) else {},
+            }
+            candidate_id = hashlib.sha256(
+                json.dumps(signature_payload, ensure_ascii=False, sort_keys=True).encode("utf-8", errors="ignore")
+            ).hexdigest()[:12]
+            raw_item["candidate_id"] = f"c{index}_{candidate_id}"
+            items.append(raw_item)
+        return items
+
+    def _find_action_candidate(self, candidate_id: str) -> dict[str, Any]:
+        target_id = str(candidate_id or "").strip()
+        if not target_id:
+            return {}
+        target_hash = target_id.rsplit("_", 1)[-1]
+        for item in self._playwright_mcp_action_candidates(limit=120):
+            item_id = str(item.get("candidate_id") or "").strip()
+            item_hash = item_id.rsplit("_", 1)[-1]
+            if item_id == target_id or (target_hash and item_hash == target_hash):
+                return item
+        return {}
+
     def playwright_mcp_snapshot(
         self,
         *,
@@ -939,6 +1141,8 @@ class BrowserBridge:
         current_tab = _extract_current_tab(structured_tabs)
         snapshot_text = str(result.get("text_raw") or result.get("text") or "").strip()
         diagnostics = self._playwright_mcp_page_diagnostics() if _browser_diagnostics_enabled() else {}
+        page_state = self._playwright_mcp_page_state()
+        action_candidates = self._playwright_mcp_action_candidates()
         resolved_url = str(current_tab.get("url") or target_url or "").strip()
         resolved_title = str(current_tab.get("title") or "").strip()
         return {
@@ -947,6 +1151,8 @@ class BrowserBridge:
             "title": resolved_title,
             "instruction": str(instruction or "").strip(),
             "text": snapshot_text,
+            "page_state": page_state,
+            "action_candidates": action_candidates,
             "diagnostics": diagnostics,
             "navigation": navigation,
             "tool_result": result,
@@ -991,6 +1197,8 @@ class BrowserBridge:
 
         diagnostics = self._playwright_mcp_page_diagnostics() if _browser_diagnostics_enabled() else {}
         viewport = self._playwright_mcp_viewport_metadata(diagnostics)
+        page_state = self._playwright_mcp_page_state()
+        action_candidates = self._playwright_mcp_action_candidates()
         tabs = self.playwright_mcp_tabs()
         structured_tabs = tabs.get("structured_content") if isinstance(tabs.get("structured_content"), dict) else {}
         current_tab = _extract_current_tab(structured_tabs)
@@ -1010,6 +1218,8 @@ class BrowserBridge:
             "original_image_base64_length": int(image.get("original_base64_length") or 0),
             "viewport": viewport,
             "device_pixel_ratio": viewport.get("devicePixelRatio") if isinstance(viewport, dict) else None,
+            "page_state": page_state,
+            "action_candidates": action_candidates,
             "diagnostics": diagnostics,
             "navigation": navigation,
             "tabs": tabs,
@@ -1259,15 +1469,26 @@ class BrowserBridge:
         *,
         x: Any,
         y: Any,
+        candidate_id: str = "",
         target_description: str = "",
         task_id: str = "",
         action_id: str = "",
     ) -> dict[str, Any]:
-        try:
-            norm_x = max(0.0, min(float(x), 1000.0))
-            norm_y = max(0.0, min(float(y), 1000.0))
-        except Exception as exc:
-            raise ValueError("Hit test requires numeric x and y coordinates from 0 to 1000.") from exc
+        selected_candidate: dict[str, Any] = {}
+        candidate_name = str(candidate_id or "").strip()
+        if candidate_name:
+            selected_candidate = self._find_action_candidate(candidate_name)
+            if not selected_candidate:
+                raise RuntimeError(f"Action candidate not found: {candidate_name}")
+            center = selected_candidate.get("center") if isinstance(selected_candidate.get("center"), dict) else {}
+            norm_x = max(0.0, min(float(center.get("normalizedX") or 0), 1000.0))
+            norm_y = max(0.0, min(float(center.get("normalizedY") or 0), 1000.0))
+        else:
+            try:
+                norm_x = max(0.0, min(float(x), 1000.0))
+                norm_y = max(0.0, min(float(y), 1000.0))
+            except Exception as exc:
+                raise ValueError("Hit test requires numeric x/y coordinates or candidate_id.") from exc
         js = r"""() => {
   const compact = (value, max = 180) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
   const cssEscape = (value) => window.CSS && CSS.escape
@@ -1358,6 +1579,10 @@ class BrowserBridge:
         if not isinstance(parsed, dict):
             raise RuntimeError(f"Hit test returned invalid payload: {parsed}")
         parsed["target_description"] = str(target_description or "").strip()
+        if selected_candidate:
+            parsed["candidate"] = selected_candidate
+            parsed["candidate_id"] = candidate_name
+        parsed["page_state"] = self._playwright_mcp_page_state()
         if task_id:
             parsed["task_id"] = task_id
         if action_id:
@@ -1424,14 +1649,30 @@ class BrowserBridge:
         action = str(payload.get("action") or "").strip().lower()
         task_id = str(payload.get("task_id") or "").strip()
         action_id = str(payload.get("action_id") or "").strip()
+        candidate_id = str(payload.get("candidate_id") or "").strip()
         wait_after = max(0, min(int(payload.get("wait_ms") or 800), 30000))
         result: dict[str, Any]
         if action in {"click", "click_xy"}:
-            result = self._playwright_mcp_click_normalised(
-                payload.get("x"),
-                payload.get("y"),
-                target_description=str(payload.get("target_description") or ""),
-            )
+            if candidate_id:
+                candidate = self._find_action_candidate(candidate_id)
+                if not candidate:
+                    raise RuntimeError(f"Action candidate not found: {candidate_id}")
+                center = candidate.get("center") if isinstance(candidate.get("center"), dict) else {}
+                css_x = int(center.get("x") or 0)
+                css_y = int(center.get("y") or 0)
+                result = self._playwright_mcp_dom_coordinate_click(
+                    css_x,
+                    css_y,
+                    target_description=str(payload.get("target_description") or candidate.get("label") or ""),
+                )
+                result["candidate"] = candidate
+                result["candidate_id"] = candidate_id
+            else:
+                result = self._playwright_mcp_click_normalised(
+                    payload.get("x"),
+                    payload.get("y"),
+                    target_description=str(payload.get("target_description") or ""),
+                )
         elif action == "scroll":
             delta_y = payload.get("delta_y")
             if delta_y is None:
@@ -1456,12 +1697,14 @@ class BrowserBridge:
         if wait_after > 0:
             self._playwright_mcp_wait(wait_after)
         diagnostics = self._playwright_mcp_page_diagnostics() if _browser_diagnostics_enabled() else {}
+        page_state = self._playwright_mcp_page_state()
         return {
             "ok": True,
             "task_id": task_id,
             "action_id": action_id,
             "action": action,
             "result": result,
+            "page_state": page_state,
             "diagnostics": diagnostics,
         }
 

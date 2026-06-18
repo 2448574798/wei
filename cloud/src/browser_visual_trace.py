@@ -3,10 +3,40 @@ from __future__ import annotations
 
 def format_browser_diagnostics(payload: dict, *, max_controls: int = 18) -> list[str]:
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else {}
-    if not diagnostics or diagnostics.get("ok") is False:
-        return []
-
+    page_state = payload.get("page_state") if isinstance(payload.get("page_state"), dict) else {}
+    action_candidates = payload.get("action_candidates") if isinstance(payload.get("action_candidates"), list) else []
     lines: list[str] = []
+    if page_state and page_state.get("ok") is not False:
+        state_viewport = page_state.get("viewport") if isinstance(page_state.get("viewport"), dict) else {}
+        state_scroll = page_state.get("scroll") if isinstance(page_state.get("scroll"), dict) else {}
+        lines.append(
+            "Page state: "
+            f"sig={page_state.get('signature', '-')}, "
+            f"url={str(page_state.get('url') or '-')[:180]}, "
+            f"viewport={state_viewport.get('width', '-')}x{state_viewport.get('height', '-')}, "
+            f"dpr={state_viewport.get('devicePixelRatio', state_viewport.get('dpr', '-'))}, "
+            f"scrollY={state_scroll.get('y', '-')}, "
+            f"textHash={page_state.get('visibleTextHash', '-')}"
+        )
+    if action_candidates:
+        lines.append("Visible action candidates:")
+        for item in action_candidates[:max_controls]:
+            if not isinstance(item, dict):
+                continue
+            candidate_id = str(item.get("candidate_id") or "").strip()
+            label = str(item.get("label") or item.get("text") or item.get("ariaLabel") or item.get("href") or "").strip()
+            tag = str(item.get("tag") or "element").strip()
+            rect = item.get("rect") if isinstance(item.get("rect"), dict) else {}
+            center = item.get("center") if isinstance(item.get("center"), dict) else {}
+            selector = str(item.get("selector") or "").strip()
+            lines.append(
+                f"- {candidate_id or '-'} | {label[:160] or '[no text]'} | {tag} | "
+                f"rect={rect.get('x', '-')},{rect.get('y', '-')},{rect.get('width', '-')}x{rect.get('height', '-')} | "
+                f"center={center.get('normalizedX', '-')},{center.get('normalizedY', '-')} | selector: {selector[:140] or '-'}"
+            )
+    if not diagnostics or diagnostics.get("ok") is False:
+        return lines
+
     viewport = diagnostics.get("viewport") if isinstance(diagnostics.get("viewport"), dict) else {}
     scroll = diagnostics.get("scroll") if isinstance(diagnostics.get("scroll"), dict) else {}
     if viewport or scroll:

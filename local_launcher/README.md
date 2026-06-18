@@ -16,7 +16,7 @@ Cloud Wei Agent
 The local launcher no longer starts a local Open Interpreter HTTP service or a local HTTP browser bridge. Browser automation is driven through the worker websocket connection to the cloud server.
 Vision planning, verification, and retry policy are cloud-side responsibilities. The local worker only captures screenshots, executes browser actions, and reports results over the websocket.
 It does not keep `BrowserJob`, `_jobs`, `start_job`, `watch_text`, or `interaction_watch` state locally; Redis job state belongs to the cloud server.
-On every websocket reconnect it sends a fresh `register` message. Commands carry `request_id`, browser actions carry `action_id`, and responses echo those IDs for cloud-side trace alignment. Screenshots include viewport width, height, and device pixel ratio. If Playwright MCP becomes unavailable at the transport layer, the worker restarts MCP and retries the tool call once.
+On every websocket reconnect it sends a fresh `register` message. Commands carry `request_id`, browser actions carry `action_id`, and responses echo those IDs for cloud-side trace alignment. Screenshots include viewport width, height, device pixel ratio, a lightweight `page_state` signature, and visible `action_candidates`. Snapshots, hit-tests, and visual actions also return `page_state` so the cloud can detect tab, URL, viewport, scroll, or render-state drift before clicking. For click actions, the cloud should prefer `candidate_id` from `action_candidates` and only fall back to raw x/y coordinates when no candidate matches. If Playwright MCP becomes unavailable at the transport layer, the worker restarts MCP and retries the tool call once.
 
 ## What Runs Locally
 

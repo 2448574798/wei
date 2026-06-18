@@ -48,6 +48,8 @@ def compact_visual_screenshot(payload: dict, *, include_image: bool = True) -> d
         "image_base64_length": image_length,
         "viewport": payload.get("viewport") if isinstance(payload.get("viewport"), dict) else {},
         "device_pixel_ratio": payload.get("device_pixel_ratio"),
+        "page_state": compact_page_state(payload.get("page_state") if isinstance(payload.get("page_state"), dict) else {}),
+        "action_candidates": compact_action_candidates(payload.get("action_candidates") if isinstance(payload.get("action_candidates"), list) else []),
         "navigation": payload.get("navigation") if isinstance(payload.get("navigation"), dict) else {},
         "diagnostics": format_browser_diagnostics(payload, max_controls=8),
     }
@@ -64,6 +66,86 @@ def compact_visual_screenshot(payload: dict, *, include_image: bool = True) -> d
     return compact
 
 
+def compact_action_candidates(candidates: list, *, limit: int = 24) -> list[dict]:
+    compact: list[dict] = []
+    if not isinstance(candidates, list):
+        return compact
+    for item in candidates[: max(0, min(limit, 80))]:
+        if not isinstance(item, dict):
+            continue
+        compact.append(
+            {
+                "candidate_id": str(item.get("candidate_id") or "").strip(),
+                "label": str(item.get("label") or item.get("text") or item.get("ariaLabel") or "").strip()[:180],
+                "tag": str(item.get("tag") or "").strip(),
+                "role": str(item.get("role") or "").strip(),
+                "href": str(item.get("href") or "").strip()[:180],
+                "selector": str(item.get("selector") or "").strip()[:220],
+                "rect": item.get("rect") if isinstance(item.get("rect"), dict) else {},
+                "center": item.get("center") if isinstance(item.get("center"), dict) else {},
+            }
+        )
+    return compact
+
+
+def compact_page_state(page_state: dict) -> dict:
+    if not isinstance(page_state, dict) or page_state.get("ok") is False:
+        return {}
+    viewport = page_state.get("viewport") if isinstance(page_state.get("viewport"), dict) else {}
+    scroll = page_state.get("scroll") if isinstance(page_state.get("scroll"), dict) else {}
+    return {
+        "signature": str(page_state.get("signature") or "").strip(),
+        "url": str(page_state.get("url") or "").strip(),
+        "title": str(page_state.get("title") or "").strip(),
+        "readyState": str(page_state.get("readyState") or "").strip(),
+        "capturedAt": page_state.get("capturedAt"),
+        "viewport": viewport,
+        "scroll": scroll,
+        "visibleTextHash": str(page_state.get("visibleTextHash") or "").strip(),
+        "visibleTextLength": int(page_state.get("visibleTextLength") or 0),
+        "visibleTextPreview": str(page_state.get("visibleTextPreview") or "").strip()[:280],
+    }
+
+
+def page_state_drift_issue(reference: dict, current: dict) -> str:
+    reference_state = reference.get("page_state") if isinstance(reference.get("page_state"), dict) else {}
+    current_state = current.get("page_state") if isinstance(current.get("page_state"), dict) else {}
+    if not reference_state or not current_state:
+        return ""
+    ref_url = str(reference_state.get("url") or "").strip().split("#", 1)[0]
+    cur_url = str(current_state.get("url") or "").strip().split("#", 1)[0]
+    if ref_url and cur_url and ref_url != cur_url:
+        return f"page state mismatch: url changed from {ref_url[:160]} to {cur_url[:160]}"
+
+    ref_viewport = reference_state.get("viewport") if isinstance(reference_state.get("viewport"), dict) else {}
+    cur_viewport = current_state.get("viewport") if isinstance(current_state.get("viewport"), dict) else {}
+    try:
+        width_diff = abs(int(ref_viewport.get("width") or 0) - int(cur_viewport.get("width") or 0))
+        height_diff = abs(int(ref_viewport.get("height") or 0) - int(cur_viewport.get("height") or 0))
+    except Exception:
+        width_diff = height_diff = 0
+    if width_diff > 24 or height_diff > 24:
+        return f"page state mismatch: viewport changed by {width_diff}x{height_diff}"
+
+    try:
+        ref_dpr = float(ref_viewport.get("devicePixelRatio") or ref_viewport.get("dpr") or 1)
+        cur_dpr = float(cur_viewport.get("devicePixelRatio") or cur_viewport.get("dpr") or 1)
+    except Exception:
+        ref_dpr = cur_dpr = 1.0
+    if abs(ref_dpr - cur_dpr) > 0.05:
+        return f"page state mismatch: device pixel ratio changed from {ref_dpr:.2f} to {cur_dpr:.2f}"
+
+    ref_scroll = reference_state.get("scroll") if isinstance(reference_state.get("scroll"), dict) else {}
+    cur_scroll = current_state.get("scroll") if isinstance(current_state.get("scroll"), dict) else {}
+    try:
+        scroll_diff = abs(int(ref_scroll.get("y") or 0) - int(cur_scroll.get("y") or 0))
+    except Exception:
+        scroll_diff = 0
+    if scroll_diff > 160:
+        return f"page state mismatch: scrollY changed by {scroll_diff}px"
+    return ""
+
+
 def _compact_action_result(result: dict) -> dict:
     if not isinstance(result, dict):
         return {"raw": str(result)[:1200]}
@@ -72,6 +154,7 @@ def _compact_action_result(result: dict) -> dict:
         "task_id": str(result.get("task_id") or "").strip(),
         "action_id": str(result.get("action_id") or "").strip(),
         "result": result.get("result") if isinstance(result.get("result"), dict) else {},
+        "page_state": compact_page_state(result.get("page_state") if isinstance(result.get("page_state"), dict) else {}),
     }
     diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
     if diagnostics:
@@ -162,13 +245,16 @@ def format_click_hit_test_summary(hit_test: dict) -> str:
         return str(hit_test.get("reason") or "hit-test failed")
     target = hit_test.get("target") if isinstance(hit_test.get("target"), dict) else {}
     point = hit_test.get("point") if isinstance(hit_test.get("point"), dict) else {}
+    candidate = hit_test.get("candidate") if isinstance(hit_test.get("candidate"), dict) else {}
     label = (
         str(target.get("text") or target.get("ariaLabel") or target.get("placeholder") or target.get("title") or target.get("dataE2e") or "").strip()
     )
+    candidate_label = str(candidate.get("label") or "").strip()
     tag = str(target.get("tag") or hit_test.get("targetTag") or "-").strip() or "-"
     selector = str(target.get("selector") or "").strip()
     return (
         f"point=({point.get('x', '-')},{point.get('y', '-')}); "
+        f"candidate={hit_test.get('candidate_id') or '-'}:{candidate_label[:80] or '-'}; "
         f"actionable={bool(hit_test.get('actionable'))}; tag={tag}; "
         f"label={label[:120] or '-'}; selector={selector[:160] or '-'}"
     )
@@ -603,13 +689,17 @@ def run_local_browser_visual_operation(
                     state="preflight",
                     round_index=round_index,
                     status="running",
-                    summary=f"Hit-testing click target: {target_description or '-'}",
+                    summary=f"Hit-testing click target: {target_description or action.get('candidate_id') or '-'}",
                     action=action,
                     action_id=action_id,
                 )
                 try:
                     hit_test = _run_click_hit_test(action)
+                    state_drift_issue = page_state_drift_issue(screenshot, hit_test)
                     hit_issue, hit_score = click_hit_test_safety_issue(action, hit_test)
+                    if state_drift_issue:
+                        hit_issue = state_drift_issue
+                        hit_score = 0.0
                     hit_summary = format_click_hit_test_summary(hit_test)
                     _emit_artifact(
                         artifact_callback,
@@ -618,6 +708,12 @@ def run_local_browser_visual_operation(
                         action=action,
                         action_id=action_id,
                         hit_test=hit_test,
+                        page_state_before=compact_page_state(
+                            screenshot.get("page_state") if isinstance(screenshot.get("page_state"), dict) else {}
+                        ),
+                        page_state_after=compact_page_state(
+                            hit_test.get("page_state") if isinstance(hit_test.get("page_state"), dict) else {}
+                        ),
                         score=hit_score,
                         issue=hit_issue,
                         summary=hit_summary,
@@ -638,6 +734,8 @@ def run_local_browser_visual_operation(
                                 "hit_test": hit_test,
                                 "screenshot": screenshot,
                                 "score": hit_score,
+                                "page_state_before": screenshot.get("page_state") if isinstance(screenshot.get("page_state"), dict) else {},
+                                "page_state_after": hit_test.get("page_state") if isinstance(hit_test.get("page_state"), dict) else {},
                             },
                         )
                         failure_events.append(last_failure)

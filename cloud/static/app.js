@@ -685,6 +685,19 @@ function visualTraceOverview(artifacts) {
     ].filter(Boolean);
 }
 
+function formatPageStateShort(state) {
+    if (!state || typeof state !== "object") return "";
+    const viewport = state.viewport && typeof state.viewport === "object" ? state.viewport : {};
+    const scroll = state.scroll && typeof state.scroll === "object" ? state.scroll : {};
+    return [
+        state.signature ? `sig=${state.signature}` : "",
+        state.url ? `url=${String(state.url).slice(0, 120)}` : "",
+        viewport.width || viewport.height ? `vp=${viewport.width || "-"}x${viewport.height || "-"}` : "",
+        scroll.y !== undefined ? `scrollY=${scroll.y}` : "",
+        state.visibleTextHash ? `text=${state.visibleTextHash}` : "",
+    ].filter(Boolean).join(", ");
+}
+
 function summarizeVisualArtifact(item) {
     const event = String(item?.event || "artifact").trim();
     if (event === "state_transition") {
@@ -717,10 +730,13 @@ function summarizeVisualArtifact(item) {
         ].filter(Boolean).join("; ");
     }
     if (event === "click_preflight") {
+        const beforeState = formatPageStateShort(item.page_state_before);
+        const afterState = formatPageStateShort(item.page_state_after);
         return [
             item.action_id ? `action_id=${item.action_id}` : "",
             item.score !== undefined ? `score=${Number(item.score).toFixed(2)}` : "",
             item.issue ? `issue=${item.issue}` : "",
+            beforeState || afterState ? `state=${beforeState || "-"} -> ${afterState || "-"}` : "",
             item.summary || "",
         ].filter(Boolean).join("; ");
     }

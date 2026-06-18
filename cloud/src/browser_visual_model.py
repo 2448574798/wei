@@ -54,12 +54,16 @@ def _call_browser_vision_model(*, instruction: str, screenshot: dict, round_inde
         "Coordinate system:\n"
         "- For click actions, return x and y as integers from 0 to 1000, normalized to the visible screenshot viewport.\n"
         "- x=0 is the left edge, x=1000 is the right edge, y=0 is the top, y=1000 is the bottom.\n\n"
+        "Action candidates:\n"
+        "- Diagnostics may include Visible action candidates with candidate_id, label, rect, and normalized center.\n"
+        "- Prefer returning candidate_id for click actions when a candidate matches the visible target.\n"
+        "- Use x/y only as a fallback when no candidate_id clearly matches.\n\n"
         "Allowed JSON schema:\n"
         "{\n"
         '  "status": "continue" | "done" | "need_user",\n'
         '  "summary": "short observation/result",\n'
         '  "actions": [\n'
-        '    {"action": "click", "x": 500, "y": 500, "reason": "...", "target_description": "visible element to click", "expected_change": "what should change after clicking", "confidence": 0.0, "wait_ms": 1200},\n'
+        '    {"action": "click", "candidate_id": "c1_abcd1234ef56", "x": 500, "y": 500, "reason": "...", "target_description": "visible element to click", "expected_change": "what should change after clicking", "confidence": 0.0, "wait_ms": 1200},\n'
         '    {"action": "scroll", "delta_y": 700, "reason": "...", "target_description": "page/feed/list", "expected_change": "new content becomes visible", "confidence": 0.0, "wait_ms": 1000},\n'
         '    {"action": "press", "key": "Escape", "reason": "...", "target_description": "current browser/page focus", "expected_change": "modal closes or page state changes", "confidence": 0.0, "wait_ms": 500},\n'
         '    {"action": "type_text", "text": "...", "reason": "...", "target_description": "focused input", "expected_change": "text appears in input", "confidence": 0.0, "wait_ms": 500},\n'
@@ -69,6 +73,7 @@ def _call_browser_vision_model(*, instruction: str, screenshot: dict, round_inde
         "Rules:\n"
         "- Return at most one action unless typing immediately after focusing an input is clearly required.\n"
         f"- Every non-wait action must include target_description, expected_change, and confidence. Use confidence >= {BROWSER_VISION_ACTION_MIN_CONFIDENCE:.2f} only when the visible target is clear.\n"
+        "- For click actions, include candidate_id when a Visible action candidate matches the target. Keep x/y if available, but candidate_id is preferred.\n"
         "- If the target is uncertain, do not click/type. Return wait, scroll, or need_user with a clear summary.\n"
         "- On video-feed or card-grid pages, click the center of the intended visible video card/thumbnail, not a nearby icon or blank gutter. "
         "Use target_description words such as video card or thumbnail when that is the intended target.\n"
