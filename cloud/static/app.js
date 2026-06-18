@@ -110,6 +110,25 @@ async function refreshHealth() {
     return appHealth;
 }
 
+function getDefaultBrowserWorker(health) {
+    const defaultId = String(health?.browser_worker_default_id || "default").trim() || "default";
+    const workers = Array.isArray(health?.browser_workers) ? health.browser_workers : [];
+    return workers.find((item) => String(item?.worker_id || "").trim() === defaultId) || null;
+}
+
+async function waitForBrowserWorkerReady(maxAttempts = 4) {
+    let health = await refreshHealth();
+    for (let attempt = 1; attempt < maxAttempts; attempt += 1) {
+        if (!health?.browser_worker_enabled || health?.browser_worker_connected) {
+            return health;
+        }
+        setStatus(`本地 Worker 未连接，正在重试 ${attempt}/${maxAttempts - 1}`, "warn");
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        health = await refreshHealth();
+    }
+    return health;
+}
+
 function updateLocalExecButton() {
     localExecBtnEl.classList.toggle("active", localExecutionMode);
     localExecBtnEl.setAttribute("aria-pressed", String(localExecutionMode));
@@ -130,14 +149,16 @@ function validateLocalExecutionHealth(health) {
 
 function runtimeStatusSuffix(health) {
     if (!health) return "";
+    const worker = getDefaultBrowserWorker(health);
+    const heartbeat = typeof worker?.heartbeat_age_sec === "number" ? `，心跳 ${Math.round(worker.heartbeat_age_sec)}s` : "";
     if (localExecutionMode) {
         if (health.browser_worker_enabled) {
-            return health.browser_worker_connected ? "本地 Worker 已连接" : "本地 Worker 未连接";
+            return health.browser_worker_connected ? `本地 Worker 已连接${heartbeat}` : "本地 Worker 未连接";
         }
         return "Browser Worker disabled";
     }
     if (health.browser_worker_enabled) {
-        return health.browser_worker_connected ? "Worker 在线" : "Worker 离线";
+        return health.browser_worker_connected ? `Worker 在线${heartbeat}` : "Worker 离线";
     }
     return "";
 }
@@ -1107,7 +1128,7 @@ async function sendMessage() {
     const stopLoadingStages = startLoadingStageRotation(loadingEl);
 
     try {
-        const health = await refreshHealth();
+        const health = localExecutionMode ? await waitForBrowserWorkerReady() : await refreshHealth();
         if (!health.one_api_token_configured) {
             throw new Error("服务端未配置 ONE_API_TOKEN，请先更新 .env 并重启服务。");
         }

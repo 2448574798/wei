@@ -30,6 +30,11 @@ On every websocket reconnect it sends a fresh `register` message. Commands carry
 local_launcher\start_local_services.bat
 ```
 
+This is the single local entrypoint. It stops stale local launcher/worker
+processes, starts the Redis SSH tunnel when enabled, then starts the Local Thin
+Browser Worker in the same console window. Close the window or press `Ctrl+C`
+to stop the worker and the managed Redis tunnel together.
+
 It reads:
 
 - `local_launcher\launcher_config.json`

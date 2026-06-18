@@ -350,6 +350,7 @@ bash deploy/check_server.sh --online --cloud-url http://127.0.0.1:8000
 
 - 云端 `.env` 在 `/opt/wei/cloud/.env`。
 - 启动脚本是 `/opt/wei/cloud/deploy/start_server.sh`。
+- 当前 Browser Worker WebSocket hub 是进程内状态，`GUNICORN_WORKERS` 必须保持 `1`。
 - 如果服务器只部署云端代码，可以只同步 `cloud/`。
 - 如果服务器保留完整仓库，也不要提交或依赖 `local_launcher/.env`、`local_launcher/launcher_config.json`、`local_launcher/launcher_logs/`。
 

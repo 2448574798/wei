@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -928,6 +929,9 @@ async def serve_favicon_svg():
 async def health():
     payload = build_health_payload()
     workers = await browser_worker_hub.list_workers()
+    payload["server_pid"] = os.getpid()
+    payload["browser_worker_hub_scope"] = "process"
+    payload["browser_worker_single_process_required"] = True
     payload["browser_workers"] = workers
     payload["browser_worker_connected"] = any(
         str(item.get("worker_id") or "").strip() == BROWSER_WORKER_DEFAULT_ID
@@ -951,6 +955,9 @@ async def browser_workers(request: Request):
         "enabled": BROWSER_WORKER_ENABLED,
         "default_worker_id": BROWSER_WORKER_DEFAULT_ID,
         "default_worker_connected": default_connected,
+        "server_pid": os.getpid(),
+        "hub_scope": "process",
+        "single_process_required": True,
         "workers": workers,
     }
 

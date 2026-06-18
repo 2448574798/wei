@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -88,6 +87,7 @@ def expand_value(value: str, base_dir: Path) -> str:
 
 def build_env(extra_env: dict[str, str], base_dir: Path) -> dict[str, str]:
     env = dict(os.environ)
+    env.setdefault("PYTHONUNBUFFERED", "1")
     for key, value in extra_env.items():
         env[str(key)] = expand_value(str(value), base_dir)
     return env
@@ -155,10 +155,6 @@ def spawn_process(entry: dict, base_dir: Path, logs_dir: Path, log_path: Path) -
     stdout_path = logs_dir / f"{name}.out.log"
     stderr_path = logs_dir / f"{name}.err.log"
 
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
-
     stdout_handle = stdout_path.open("a", encoding="utf-8")
     stderr_handle = stderr_path.open("a", encoding="utf-8")
     try:
@@ -168,7 +164,6 @@ def spawn_process(entry: dict, base_dir: Path, logs_dir: Path, log_path: Path) -
             env=env,
             stdout=stdout_handle,
             stderr=stderr_handle,
-            creationflags=creationflags,
         )
     except Exception:
         stdout_handle.close()
@@ -198,7 +193,12 @@ def stop_process(entry: dict, process: subprocess.Popen, log_path: Path) -> None
     write_log(log_path, f"Stopping {name} pid={process.pid}")
     try:
         if os.name == "nt":
-            process.send_signal(signal.CTRL_BREAK_EVENT)
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
         else:
             process.terminate()
         process.wait(timeout=8)
@@ -241,6 +241,47 @@ def validate_config(config: dict) -> list[dict]:
         if not isinstance(max_restart_count, int) or max_restart_count < 0:
             raise ValueError(f"Process {item.get('name', '<unknown>')} max_restart_count must be a non-negative integer.")
     return processes
+
+
+def redis_tunnel_entry_from_env() -> dict | None:
+    enabled = os.getenv("WEI_REDIS_TUNNEL_ENABLED", "false").strip().lower()
+    if enabled in {"0", "false", "no", "off"}:
+        return None
+
+    host = os.getenv("WEI_REDIS_SSH_HOST", "").strip()
+    if not host:
+        raise ValueError("WEI_REDIS_SSH_HOST is required when WEI_REDIS_TUNNEL_ENABLED is not false.")
+
+    user = os.getenv("WEI_REDIS_SSH_USER", "ubuntu").strip() or "ubuntu"
+    local_port = int(os.getenv("WEI_REDIS_LOCAL_PORT", "6380") or "6380")
+    remote_port = int(os.getenv("WEI_REDIS_REMOTE_PORT", "6379") or "6379")
+
+    return {
+        "name": "redis_ssh_tunnel",
+        "enabled": True,
+        "command": [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-o",
+            "ServerAliveInterval=30",
+            "-N",
+            "-L",
+            f"{local_port}:127.0.0.1:{remote_port}",
+            f"{user}@{host}",
+        ],
+        "cwd": str(app_dir()),
+        "env": {},
+        "restart_on_exit": True,
+        "restart_delay_sec": 3,
+        "max_restart_count": 5,
+        "ready_url": "",
+        "ready_timeout_sec": 0,
+    }
 
 
 def restart_process(
@@ -297,6 +338,9 @@ def main() -> int:
 
     config = load_config(config_path)
     processes = validate_config(config)
+    redis_tunnel_entry = redis_tunnel_entry_from_env()
+    if redis_tunnel_entry:
+        processes = [redis_tunnel_entry, *processes]
     started: list[dict[str, Any]] = []
 
     try:
