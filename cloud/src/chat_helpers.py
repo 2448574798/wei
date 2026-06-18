@@ -41,8 +41,7 @@ def default_tool_title(tool_name: str) -> str:
         "open_local_browser_page": "本地浏览器",
         "inspect_local_webpage": "本地网页快照",
         "operate_local_browser_visual": "本地视觉浏览器",
-        "start_local_browser_visual_job": "本地视觉长任务",
-        "start_local_webpage_monitor": "本地网页观察",
+        "start_cloud_browser_visual_job": "云端视觉长任务",
         "send_email": "发送邮件",
     }
     return mapping.get(tool_name, tool_name or "工具")

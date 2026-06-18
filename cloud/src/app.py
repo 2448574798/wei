@@ -52,7 +52,7 @@ from src.dispatching import (
     validate_dispatch_decision,
 )
 from src.human_loop import confirmation_store
-from src.local_jobs import local_job_store
+from src.job_store import cloud_job_store
 from src.research_client import call_online_research_model
 from src.runtime_config import (
     APP_HOST,
@@ -98,8 +98,7 @@ from src.tools import (
     request_human_confirmation,
     send_email,
     smtp_is_configured,
-    start_local_browser_visual_job,
-    start_local_webpage_monitor,
+    start_cloud_browser_visual_job,
     start_open_interpreter_job,
 )
 from src.web_helpers import (
@@ -164,8 +163,7 @@ def get_allowed_tools(decision: dict | None, local_execution: bool) -> list:
             open_local_browser_page,
             inspect_local_webpage,
             operate_local_browser_visual,
-            start_local_browser_visual_job,
-            start_local_webpage_monitor,
+            start_cloud_browser_visual_job,
             request_human_confirmation,
         ]
         if allow_email:
@@ -185,8 +183,7 @@ def get_allowed_tools(decision: dict | None, local_execution: bool) -> list:
             open_local_browser_page,
             inspect_local_webpage,
             operate_local_browser_visual,
-            start_local_browser_visual_job,
-            start_local_webpage_monitor,
+            start_cloud_browser_visual_job,
             request_human_confirmation,
         ]
         if allow_email:
@@ -447,9 +444,9 @@ async def agent_node(state: AgentState, config=None):
         "- Use open_local_browser_page when the main task is simply to open a webpage in the configured local browser.\n"
         "- Use inspect_local_webpage when you need a local logged-in webpage snapshot before deciding next actions.\n"
         "- Use operate_local_browser_visual for visually complex local browser pages, canvas/video-heavy pages, uncertain selectors, or when screenshot recognition is needed.\n"
-        "- Use start_local_browser_visual_job for longer or uncertain visual browser tasks so progress can be observed and cancelled.\n"
+        "- Use start_cloud_browser_visual_job for longer or uncertain visual browser tasks so cloud Redis progress can be streamed and cancelled.\n"
         "- For browser recognition, use the returned Page diagnostics and Visible controls candidates before choosing selectors or click targets.\n"
-        "- Use start_local_webpage_monitor for longer local webpage observation tasks such as watching for specific visible text.\n"
+        "- Do not create local browser watch loops. For observation tasks, request a snapshot, decide in the cloud, then issue the next single browser action if needed.\n"
         "- Pass runnable code directly to ask_open_interpreter, not natural-language instructions.\n"
         "- For side-effect actions such as opening apps, opening a browser, writing files, or launching programs, make the code print a short Chinese success message after the action completes.\n"
         "- Do not return raw booleans like True or False when a clearer execution message can be printed.\n"
@@ -462,7 +459,7 @@ async def agent_node(state: AgentState, config=None):
             "\n\nLocal execution policy:\n"
             "- The user is asking to operate their local computer or run local code.\n"
             "- Prefer dedicated local tools before falling back to ask_open_interpreter.\n"
-            "- For webpage tasks on the local machine, prefer list_local_browser_tabs, open_local_browser_page, inspect_local_webpage, operate_local_browser_visual, start_local_browser_visual_job, or start_local_webpage_monitor before falling back to generic code execution.\n"
+            "- For webpage tasks on the local machine, prefer list_local_browser_tabs, open_local_browser_page, inspect_local_webpage, operate_local_browser_visual, or start_cloud_browser_visual_job before falling back to generic code execution.\n"
             "- If you call ask_open_interpreter, provide complete runnable code.\n"
             "- When opening local apps, browsers, files, or performing side effects, include a final print statement in Chinese describing what succeeded.\n"
             "- Prefer concise, reliable code over fancy code."
@@ -818,7 +815,7 @@ def _job_stream_snapshot(job: dict, *, progress_offset: int, artifact_offset: in
     return events, len(progress), len(artifacts), completed
 
 
-async def stream_local_job(job_id: str):
+async def stream_cloud_job(job_id: str):
     progress_offset = 0
     artifact_offset = 0
     last_heartbeat = asyncio.get_running_loop().time()
@@ -826,7 +823,7 @@ async def stream_local_job(job_id: str):
     async def event_generator():
         nonlocal progress_offset, artifact_offset, last_heartbeat
         while True:
-            job = await asyncio.to_thread(local_job_store.get, job_id)
+            job = await asyncio.to_thread(cloud_job_store.get, job_id)
             if not job:
                 yield build_sse_event("job_missing", {"job_id": job_id})
                 break
@@ -1182,7 +1179,7 @@ async def chat_confirm_stream(request: Request):
 @app.get("/api/jobs/{job_id}")
 async def job_status(job_id: str, request: Request):
     current_user = require_authenticated_user(request)
-    job = local_job_store.get(job_id)
+    job = cloud_job_store.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     if job["user_id"] and int(job["user_id"]) != int(current_user["id"]):
@@ -1193,23 +1190,23 @@ async def job_status(job_id: str, request: Request):
 @app.get("/api/jobs/{job_id}/stream")
 async def job_stream(job_id: str, request: Request):
     current_user = require_authenticated_user(request)
-    job = local_job_store.get(job_id)
+    job = cloud_job_store.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     if job["user_id"] and int(job["user_id"]) != int(current_user["id"]):
         raise HTTPException(status_code=403, detail="You cannot access this job.")
-    return await stream_local_job(job_id)
+    return await stream_cloud_job(job_id)
 
 
 @app.post("/api/jobs/{job_id}/cancel")
 async def cancel_job(job_id: str, request: Request):
     current_user = require_authenticated_user(request)
-    job = local_job_store.get(job_id)
+    job = cloud_job_store.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     if job["user_id"] and int(job["user_id"]) != int(current_user["id"]):
         raise HTTPException(status_code=403, detail="You cannot cancel this job.")
-    updated = local_job_store.cancel(job_id)
+    updated = cloud_job_store.cancel(job_id)
     return {"ok": True, "job": serialize_job_payload(updated)}
 
 

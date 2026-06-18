@@ -27,7 +27,7 @@ def _to_bool(value: str | None) -> bool:
 
 
 @dataclass
-class LocalJob:
+class CloudJob:
     id: str
     title: str
     thread_id: str
@@ -60,7 +60,7 @@ class LocalJob:
         }
 
 
-class LocalJobStore:
+class CloudJobStore:
     def __init__(self) -> None:
         self._redis = Redis.from_url(REDIS_URL, decode_responses=True)
 
@@ -74,9 +74,9 @@ class LocalJobStore:
         return f"wei:job:{job_id}:artifacts"
 
     def create(self, *, title: str, thread_id: str, user_id: int | None, username: str) -> dict:
-        job = LocalJob(
+        job = CloudJob(
             id=str(uuid4()),
-            title=title.strip() or "本地长任务",
+            title=title.strip() or "云端长任务",
             thread_id=thread_id,
             user_id=user_id,
             username=username,
@@ -238,4 +238,4 @@ class LocalJobStore:
         thread.start()
 
 
-local_job_store = LocalJobStore()
+cloud_job_store = CloudJobStore()

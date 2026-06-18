@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import time
 import threading
 from dataclasses import dataclass, field
 from typing import Any
@@ -18,6 +19,10 @@ class BrowserWorkerConnection:
     loop_thread_id: int
     meta: dict[str, Any] = field(default_factory=dict)
     pending: dict[str, concurrent.futures.Future] = field(default_factory=dict)
+    last_seen_monotonic: float = field(default_factory=time.monotonic)
+
+
+BROWSER_WORKER_HEARTBEAT_TIMEOUT_SEC = 90.0
 
 
 class BrowserWorkerHub:
@@ -37,6 +42,7 @@ class BrowserWorkerHub:
                 loop=loop,
                 loop_thread_id=threading.get_ident(),
                 meta=dict(meta or {}),
+                last_seen_monotonic=time.monotonic(),
             )
 
     async def unregister(self, worker_id: str, websocket: WebSocket | None = None) -> None:
@@ -56,12 +62,19 @@ class BrowserWorkerHub:
                     "worker_id": worker_id,
                     "meta": dict(connection.meta),
                     "pending_count": len(connection.pending),
+                    "heartbeat_age_sec": round(max(0.0, time.monotonic() - connection.last_seen_monotonic), 3),
+                    "stale": (time.monotonic() - connection.last_seen_monotonic) > BROWSER_WORKER_HEARTBEAT_TIMEOUT_SEC,
                 }
                 for worker_id, connection in sorted(self._workers.items())
             ]
 
     async def handle_message(self, worker_id: str, message: dict[str, Any]) -> None:
         message_type = str(message.get("type") or "").strip().lower()
+        with self._lock:
+            connection = self._workers.get(worker_id)
+            if connection:
+                connection.last_seen_monotonic = time.monotonic()
+                connection.meta["last_seen_at"] = time.time()
         if message_type == "response":
             request_id = str(message.get("request_id") or "").strip()
             if not request_id:
@@ -84,6 +97,16 @@ class BrowserWorkerHub:
                 connection = self._workers.get(worker_id)
                 if connection:
                     connection.meta["last_heartbeat"] = message.get("at")
+                    connection.meta["last_heartbeat_received_at"] = time.time()
+            if connection:
+                await connection.websocket.send_json(
+                    {
+                        "type": "heartbeat_ack",
+                        "worker_id": worker_id,
+                        "at": time.time(),
+                        "echo": message.get("at"),
+                    }
+                )
 
     async def request(self, worker_id: str, command: str, payload: dict[str, Any] | None = None, *, timeout_sec: int = 30) -> dict[str, Any]:
         return await asyncio.to_thread(self.request_sync, worker_id, command, payload, timeout_sec=timeout_sec)
@@ -98,11 +121,18 @@ class BrowserWorkerHub:
 
         request_id = str(uuid4())
         response_future: concurrent.futures.Future = concurrent.futures.Future()
+        request_payload = dict(payload or {})
+        request_payload.setdefault("request_id", request_id)
 
         with self._lock:
             connection = self._workers.get(worker_name)
             if not connection:
                 raise RuntimeError(f"Browser worker is not connected: {worker_name}")
+            heartbeat_age = time.monotonic() - connection.last_seen_monotonic
+            if heartbeat_age > BROWSER_WORKER_HEARTBEAT_TIMEOUT_SEC:
+                self._workers.pop(worker_name, None)
+                self._fail_pending(connection, RuntimeError(f"Browser worker heartbeat stale: {heartbeat_age:.1f}s"))
+                raise RuntimeError(f"Browser worker heartbeat stale: {worker_name} ({heartbeat_age:.1f}s)")
             if threading.get_ident() == connection.loop_thread_id:
                 raise RuntimeError("Browser worker sync request cannot run on the websocket event loop thread.")
             connection.pending[request_id] = response_future
@@ -113,7 +143,7 @@ class BrowserWorkerHub:
                     "type": "command",
                     "request_id": request_id,
                     "command": command_name,
-                    "payload": payload or {},
+                    "payload": request_payload,
                 }
             ),
             connection.loop,

@@ -171,6 +171,7 @@ function toolLabel(name) {
         tool_guard: "工具权限控制",
         request_human_confirmation: "人工确认",
         start_open_interpreter_job: "本地长任务",
+        start_cloud_browser_visual_job: "云端视觉长任务",
     };
     return map[name] || name || "工具";
 }
@@ -524,7 +525,7 @@ function buildMessageMetaFromResponse(data) {
     };
 }
 
-function pollLocalJob(jobId, onUpdate, shouldContinue = () => true) {
+function pollCloudJob(jobId, onUpdate, shouldContinue = () => true) {
     let active = true;
 
     (async () => {
@@ -543,7 +544,7 @@ function pollLocalJob(jobId, onUpdate, shouldContinue = () => true) {
             await new Promise((resolve) => window.setTimeout(resolve, 2000));
         }
     })().catch((error) => {
-        console.error("pollLocalJob failed", error);
+        console.error("pollCloudJob failed", error);
     });
 
     return () => {
@@ -551,7 +552,7 @@ function pollLocalJob(jobId, onUpdate, shouldContinue = () => true) {
     };
 }
 
-function streamLocalJob(jobId, handlers = {}, shouldContinue = () => true) {
+function streamCloudJob(jobId, handlers = {}, shouldContinue = () => true) {
     if (!window.EventSource) return null;
     const source = new EventSource(`/api/jobs/${encodeURIComponent(jobId)}/stream`, { withCredentials: true });
     let closed = false;
@@ -610,8 +611,69 @@ function buildJobBackendLabel(payload) {
     return backend || "";
 }
 
+function visualTraceTone(item) {
+    const event = String(item?.event || "").toLowerCase();
+    const status = String(item?.status || item?.failure?.severity || item?.last_failure?.severity || "").toLowerCase();
+    if (event.includes("failed") || event === "failure" || status === "failed" || status === "error") return "error";
+    if (status === "rejected" || status === "warning" || status === "retry" || status === "pending") return "warn";
+    if (status === "running") return "running";
+    if (status === "ok" || status === "done" || status === "completed") return "ok";
+    return "neutral";
+}
+
+function visualTraceTitle(item) {
+    const event = String(item?.event || "artifact").trim();
+    if (event === "state_transition") return item.state ? `State · ${item.state}` : "State";
+    if (event === "vision_decision") return "Vision Decision";
+    if (event === "click_preflight") return "Click Preflight";
+    if (event === "click_preflight_failed") return "Click Preflight Failed";
+    if (event === "action_result") return "Action Result";
+    if (event === "verification_screenshot") return "Verification Screenshot";
+    if (event === "verification") return "Action Verification";
+    if (event === "verification_policy") return "Verification Policy";
+    if (event === "failure") return "Failure";
+    if (event === "final") return "Final";
+    if (event === "screenshot") return "Screenshot";
+    return event;
+}
+
+function visualTraceBadges(item) {
+    const failure = item?.failure || item?.last_failure || {};
+    const action = item?.action || {};
+    return [
+        item?.round !== undefined ? `round ${item.round}` : "",
+        item?.status ? String(item.status) : "",
+        item?.action_id || action.action_id ? `action ${item.action_id || action.action_id}` : "",
+        action.action ? String(action.action) : "",
+        failure.failure_type || failure.category ? String(failure.failure_type || failure.category) : "",
+        failure.severity ? String(failure.severity) : "",
+    ].filter(Boolean);
+}
+
+function visualTraceOverview(artifacts) {
+    const states = artifacts.filter((item) => item?.event === "state_transition").length;
+    const failures = artifacts.filter((item) => item?.event === "failure" || item?.failure || item?.last_failure).length;
+    const screenshots = artifacts.filter((item) => item?.screenshot).length;
+    const lastFailure = [...artifacts].reverse().map((item) => item?.last_failure || item?.failure).find(Boolean) || {};
+    return [
+        `${artifacts.length} events`,
+        states ? `${states} states` : "",
+        screenshots ? `${screenshots} screenshots` : "",
+        failures ? `${failures} failures` : "",
+        lastFailure.failure_type || lastFailure.category ? `last=${lastFailure.failure_type || lastFailure.category}` : "",
+    ].filter(Boolean);
+}
+
 function summarizeVisualArtifact(item) {
     const event = String(item?.event || "artifact").trim();
+    if (event === "state_transition") {
+        return [
+            item.state ? `state=${item.state}` : "",
+            item.status ? `status=${item.status}` : "",
+            item.action_id ? `action_id=${item.action_id}` : "",
+            item.summary ? `summary=${item.summary}` : "",
+        ].filter(Boolean).join("; ");
+    }
     if (event === "vision_decision") {
         const actions = Array.isArray(item.actions) ? item.actions : [];
         const action = actions[0] || {};
@@ -626,6 +688,7 @@ function summarizeVisualArtifact(item) {
     if (event === "action_result") {
         const action = item.action || {};
         return [
+            item.action_id || action.action_id ? `action_id=${item.action_id || action.action_id}` : "",
             action.action ? `action=${action.action}` : "",
             action.target_description ? `target=${action.target_description}` : "",
             item.result?.ok !== undefined ? `ok=${Boolean(item.result.ok)}` : "",
@@ -634,6 +697,7 @@ function summarizeVisualArtifact(item) {
     }
     if (event === "click_preflight") {
         return [
+            item.action_id ? `action_id=${item.action_id}` : "",
             item.score !== undefined ? `score=${Number(item.score).toFixed(2)}` : "",
             item.issue ? `issue=${item.issue}` : "",
             item.summary || "",
@@ -645,6 +709,7 @@ function summarizeVisualArtifact(item) {
     if (event === "verification") {
         const verification = item.verification || {};
         return [
+            item.action_id ? `action_id=${item.action_id}` : "",
             verification.status ? `status=${verification.status}` : "",
             verification.matched_expected_change !== undefined ? `matched=${Boolean(verification.matched_expected_change)}` : "",
             verification.misclick !== undefined ? `misclick=${Boolean(verification.misclick)}` : "",
@@ -653,7 +718,16 @@ function summarizeVisualArtifact(item) {
         ].filter(Boolean).join("; ");
     }
     if (event === "verification_policy") {
-        return [item.status ? `status=${item.status}` : "", item.reason || ""].filter(Boolean).join("; ");
+        return [item.action_id ? `action_id=${item.action_id}` : "", item.status ? `status=${item.status}` : "", item.reason || ""].filter(Boolean).join("; ");
+    }
+    if (event === "failure") {
+        const failure = item.failure || {};
+        return [
+            item.action_id ? `action_id=${item.action_id}` : "",
+            failure.failure_type || failure.category ? `failure_type=${failure.failure_type || failure.category}` : "",
+            failure.severity ? `severity=${failure.severity}` : "",
+            failure.reason ? `reason=${failure.reason}` : "",
+        ].filter(Boolean).join("; ");
     }
     if (event === "final") {
         return [item.status ? `status=${item.status}` : "", item.summary || ""].filter(Boolean).join("; ");
@@ -674,31 +748,47 @@ function buildVisualArtifactsHtml(job) {
     const visualArtifacts = artifacts.filter((item) => item && typeof item === "object");
     if (!visualArtifacts.length) return "";
 
-    const rows = visualArtifacts.slice(-12).map((item) => {
+    const overview = visualTraceOverview(visualArtifacts);
+    const rows = visualArtifacts.slice(-24).map((item) => {
         const screenshot = item.screenshot || {};
+        const failure = item.failure || item.last_failure || {};
+        const tone = visualTraceTone(item);
+        const badges = visualTraceBadges(item).map((badge) => {
+            const badgeTone = badge === failure.failure_type || badge === failure.category || badge === failure.severity ? ` ${tone}` : "";
+            return `<span class="job-trace-badge${badgeTone}">${escapeHtml(badge)}</span>`;
+        }).join("");
         const image = screenshot.image_base64
             ? `<img class="job-artifact-image" alt="browser screenshot" src="data:${escapeHtml(screenshot.mime_type || "image/png")};base64,${screenshot.image_base64}">`
             : "";
         const diagnostics = Array.isArray(screenshot.diagnostics) && screenshot.diagnostics.length
             ? `<div class="job-artifact-diagnostics">${escapeHtml(screenshot.diagnostics.slice(0, 4).join("\n"))}</div>`
             : "";
+        const hint = failure.diagnostic_hint ? `<div class="job-trace-hint">${escapeHtml(failure.diagnostic_hint)}</div>` : "";
         return `
-            <div class="job-artifact">
-                <div class="job-artifact-head">
-                    <span>Round ${escapeHtml(item.round ?? "-")}</span>
-                    <span>${escapeHtml(item.event || "artifact")}</span>
+            <div class="job-trace-item ${escapeHtml(tone)}">
+                <div class="job-trace-marker"></div>
+                <div class="job-trace-body">
+                    <div class="job-artifact-head">
+                        <span>${escapeHtml(visualTraceTitle(item))}</span>
+                        <span>${escapeHtml(item.event || "artifact")}</span>
+                    </div>
+                    <div class="job-trace-badges">${badges}</div>
+                    <div class="job-artifact-summary">${escapeHtml(summarizeVisualArtifact(item) || "-")}</div>
+                    ${hint}
+                    ${image}
+                    ${diagnostics}
                 </div>
-                ${image}
-                <div class="job-artifact-summary">${escapeHtml(summarizeVisualArtifact(item) || "-")}</div>
-                ${diagnostics}
             </div>
         `;
     }).join("");
 
     return `
         <div class="job-detail-block">
-            <div class="job-detail-label">Visual Trace</div>
-            <div class="job-artifacts">${rows}</div>
+            <div class="visual-trace-header">
+                <div class="job-detail-label">Visual Trace</div>
+                <div class="visual-trace-overview">${overview.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>
+            </div>
+            <div class="job-trace-timeline">${rows}</div>
         </div>
     `;
 }
@@ -768,7 +858,7 @@ function appendInteractivePanel(wrapper, meta) {
         const panel = document.createElement("div");
         panel.className = "interactive-panel job-panel";
         panel.innerHTML = `
-            <div class="interactive-title">本地长任务</div>
+            <div class="interactive-title">云端长任务</div>
             <div class="interactive-copy">${escapeHtml(meta.pendingJob.title || "")}</div>
             <div class="interactive-sub">任务编号：${escapeHtml(meta.pendingJob.id || "")}</div>
             <div class="interactive-sub job-status">状态：${escapeHtml(meta.pendingJob.status || "running")}</div>
@@ -795,7 +885,7 @@ function appendInteractivePanel(wrapper, meta) {
                 progress: Array.isArray(job.progress) ? job.progress : currentJob.progress,
                 artifacts: Array.isArray(job.artifacts) ? job.artifacts : currentJob.artifacts,
             };
-            statusEl.textContent = `鐘舵€侊細${currentJob.status}`;
+            statusEl.textContent = `状态：${currentJob.status}`;
             logEl.innerHTML = (currentJob.progress || [])
                 .slice(-24)
                 .map((line) => `<div class="loading-progress-item">${escapeHtml(line)}</div>`)
@@ -822,13 +912,13 @@ function appendInteractivePanel(wrapper, meta) {
             });
             statusEl.textContent = "状态：已请求取消";
         });
-        streamLocalJob(meta.pendingJob.id, {
+        streamCloudJob(meta.pendingJob.id, {
             onSnapshot: renderJob,
             onProgress: (data) => appendJobProgress(data.message),
             onArtifact: (data) => appendJobArtifact(data.artifact),
             onFinished: renderJob,
         }, () => panel.isConnected);
-        pollLocalJob(meta.pendingJob.id, (job) => {
+        pollCloudJob(meta.pendingJob.id, (job) => {
             statusEl.textContent = `状态：${job.status}`;
             logEl.innerHTML = (job.progress || [])
                 .slice(-24)

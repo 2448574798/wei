@@ -224,12 +224,38 @@ class PlaywrightMcpClient:
         tool_name = str(name or "").strip()
         if not tool_name:
             raise ValueError("Playwright MCP tool name cannot be empty.")
+        try:
+            return self._call_tool_once(tool_name, arguments or {})
+        except Exception as exc:
+            if not self._should_restart_after_error(str(exc)):
+                raise
+            self._set_last_error(f"Restarting Playwright MCP after transport error: {exc}")
+            self.restart()
+            return self._call_tool_once(tool_name, arguments or {})
+
+    def _should_restart_after_error(self, message: str) -> bool:
+        lowered = str(message or "").lower()
+        return any(
+            token in lowered
+            for token in (
+                "not running",
+                "stdout closed",
+                "stdin",
+                "timed out",
+                "no response",
+                "server stopped",
+                "broken pipe",
+                "connection reset",
+            )
+        )
+
+    def _call_tool_once(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         self.ensure_ready(refresh_tools=False)
         result = self._request(
             "tools/call",
             {
                 "name": tool_name,
-                "arguments": arguments or {},
+                "arguments": arguments,
             },
             timeout_sec=self.request_timeout_sec,
         )
@@ -672,12 +698,17 @@ class BrowserBridge:
                 url=str(data.get("url") or "").strip(),
                 instruction=str(data.get("instruction") or "").strip(),
                 wait_ms=int(data.get("wait_ms") or 1000),
+                request_id=str(data.get("request_id") or "").strip(),
+                task_id=str(data.get("task_id") or "").strip(),
+                action_id=str(data.get("action_id") or "").strip(),
             )
         if command_name == "browser.hit_test":
             return self.playwright_mcp_hit_test(
                 x=data.get("x"),
                 y=data.get("y"),
                 target_description=str(data.get("target_description") or "").strip(),
+                task_id=str(data.get("task_id") or "").strip(),
+                action_id=str(data.get("action_id") or "").strip(),
             )
         if command_name == "browser.visual_action":
             return self.playwright_mcp_visual_action(data)
@@ -928,6 +959,9 @@ class BrowserBridge:
         url: str = "",
         instruction: str = "",
         wait_ms: int = 1000,
+        request_id: str = "",
+        task_id: str = "",
+        action_id: str = "",
     ) -> dict[str, Any]:
         target_url = str(url or "").strip()
         navigation = self._maybe_navigate_for_observation(target_url)
@@ -956,11 +990,15 @@ class BrowserBridge:
             raise RuntimeError(last_error or "Playwright MCP screenshot returned no image content.")
 
         diagnostics = self._playwright_mcp_page_diagnostics() if _browser_diagnostics_enabled() else {}
+        viewport = self._playwright_mcp_viewport_metadata(diagnostics)
         tabs = self.playwright_mcp_tabs()
         structured_tabs = tabs.get("structured_content") if isinstance(tabs.get("structured_content"), dict) else {}
         current_tab = _extract_current_tab(structured_tabs)
         return {
             "ok": True,
+            "request_id": request_id,
+            "task_id": task_id,
+            "action_id": action_id,
             "url": str(current_tab.get("url") or target_url or diagnostics.get("url") or "").strip(),
             "title": str(current_tab.get("title") or diagnostics.get("title") or "").strip(),
             "instruction": str(instruction or "").strip(),
@@ -970,9 +1008,35 @@ class BrowserBridge:
             "image_optimized": bool(image.get("optimized")),
             "image_base64_length": int(image.get("base64_length") or len(str(image.get("data") or ""))),
             "original_image_base64_length": int(image.get("original_base64_length") or 0),
+            "viewport": viewport,
+            "device_pixel_ratio": viewport.get("devicePixelRatio") if isinstance(viewport, dict) else None,
             "diagnostics": diagnostics,
             "navigation": navigation,
             "tabs": tabs,
+        }
+
+    def _playwright_mcp_viewport_metadata(self, diagnostics: dict[str, Any] | None = None) -> dict[str, Any]:
+        diag_viewport = diagnostics.get("viewport") if isinstance(diagnostics, dict) and isinstance(diagnostics.get("viewport"), dict) else {}
+        if diag_viewport:
+            return {
+                "width": int(diag_viewport.get("width") or 0),
+                "height": int(diag_viewport.get("height") or 0),
+                "devicePixelRatio": float(diag_viewport.get("devicePixelRatio") or diag_viewport.get("dpr") or 1),
+            }
+        js = "() => ({ width: window.innerWidth || 0, height: window.innerHeight || 0, devicePixelRatio: window.devicePixelRatio || 1 })"
+        try:
+            result = self.playwright_mcp.call_tool("browser_evaluate", {"function": js})
+        except Exception as exc:
+            return {"width": 0, "height": 0, "devicePixelRatio": 1, "error": str(exc)}
+        if result.get("is_error"):
+            return {"width": 0, "height": 0, "devicePixelRatio": 1, "error": str(result.get("text") or "").strip()}
+        parsed = _parse_browser_evaluate_result(str(result.get("text_raw") or result.get("text") or ""))
+        if not isinstance(parsed, dict):
+            return {"width": 0, "height": 0, "devicePixelRatio": 1}
+        return {
+            "width": int(parsed.get("width") or 0),
+            "height": int(parsed.get("height") or 0),
+            "devicePixelRatio": float(parsed.get("devicePixelRatio") or parsed.get("dpr") or 1),
         }
 
     def _normalised_point_to_viewport_js(self, x: Any, y: Any) -> str:
@@ -1190,7 +1254,15 @@ class BrowserBridge:
             }
         return {"ok": False, "error": last_error}
 
-    def playwright_mcp_hit_test(self, *, x: Any, y: Any, target_description: str = "") -> dict[str, Any]:
+    def playwright_mcp_hit_test(
+        self,
+        *,
+        x: Any,
+        y: Any,
+        target_description: str = "",
+        task_id: str = "",
+        action_id: str = "",
+    ) -> dict[str, Any]:
         try:
             norm_x = max(0.0, min(float(x), 1000.0))
             norm_y = max(0.0, min(float(y), 1000.0))
@@ -1286,6 +1358,10 @@ class BrowserBridge:
         if not isinstance(parsed, dict):
             raise RuntimeError(f"Hit test returned invalid payload: {parsed}")
         parsed["target_description"] = str(target_description or "").strip()
+        if task_id:
+            parsed["task_id"] = task_id
+        if action_id:
+            parsed["action_id"] = action_id
         return parsed
 
     def _playwright_mcp_scroll(self, delta_y: Any) -> dict[str, Any]:
@@ -1346,6 +1422,8 @@ class BrowserBridge:
 
     def playwright_mcp_visual_action(self, payload: dict[str, Any]) -> dict[str, Any]:
         action = str(payload.get("action") or "").strip().lower()
+        task_id = str(payload.get("task_id") or "").strip()
+        action_id = str(payload.get("action_id") or "").strip()
         wait_after = max(0, min(int(payload.get("wait_ms") or 800), 30000))
         result: dict[str, Any]
         if action in {"click", "click_xy"}:
@@ -1380,6 +1458,8 @@ class BrowserBridge:
         diagnostics = self._playwright_mcp_page_diagnostics() if _browser_diagnostics_enabled() else {}
         return {
             "ok": True,
+            "task_id": task_id,
+            "action_id": action_id,
             "action": action,
             "result": result,
             "diagnostics": diagnostics,
@@ -1448,19 +1528,29 @@ class BrowserBridge:
                 message = json.loads(raw_message)
                 if not isinstance(message, dict):
                     continue
-                if str(message.get("type") or "").strip().lower() != "command":
+                message_type = str(message.get("type") or "").strip().lower()
+                if message_type == "heartbeat_ack":
+                    continue
+                if message_type != "command":
                     continue
 
                 request_id = str(message.get("request_id") or "").strip()
                 command = str(message.get("command") or "").strip()
                 payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+                payload = dict(payload)
+                payload.setdefault("request_id", request_id)
                 try:
                     result = self.handle_worker_command(command, payload)
+                    if isinstance(result, dict):
+                        result.setdefault("request_id", request_id)
+                        if payload.get("action_id"):
+                            result.setdefault("action_id", str(payload.get("action_id") or "").strip())
                     response = {"type": "response", "request_id": request_id, "ok": True, "payload": result}
                 except Exception as exc:
                     response = {
                         "type": "response",
                         "request_id": request_id,
+                        "action_id": str(payload.get("action_id") or "").strip(),
                         "ok": False,
                         "error": _friendly_bridge_error_message(str(exc)),
                     }

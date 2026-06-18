@@ -65,6 +65,21 @@ class BrowserVisualRunnerTests(unittest.TestCase):
         self.assertEqual(compact["title"], "Example")
         self.assertEqual(compact["image_base64"], "abc123")
 
+    def test_compact_visual_screenshot_keeps_viewport_and_dpr(self) -> None:
+        compact = runner.compact_visual_screenshot(
+            {
+                "viewport": {"width": 1280, "height": 720, "devicePixelRatio": 1.25},
+                "device_pixel_ratio": 1.25,
+                "image_base64": "abc123",
+                "image_base64_length": 6,
+            },
+            include_image=False,
+        )
+
+        self.assertEqual(compact["viewport"]["width"], 1280)
+        self.assertEqual(compact["viewport"]["height"], 720)
+        self.assertEqual(compact["device_pixel_ratio"], 1.25)
+
     def test_compact_visual_screenshot_omits_large_trace_image(self) -> None:
         with (
             mock.patch.object(runner, "BROWSER_VISUAL_TRACE_SCREENSHOTS", True),
@@ -227,10 +242,46 @@ class BrowserVisualRunnerTests(unittest.TestCase):
             )
 
         final = artifacts[-1]
-        self.assertIn("Last failure: category=model_no_action", output)
+        state_names = [item["state"] for item in artifacts if item.get("event") == "state_transition"]
+        self.assertIn("Last failure: failure_type=model_no_action", output)
+        self.assertIn("created", state_names)
+        self.assertIn("worker_check", state_names)
+        self.assertIn("take_screenshot", state_names)
+        self.assertIn("vision_decide", state_names)
+        self.assertIn("policy_check", state_names)
+        self.assertIn("failed", state_names)
         self.assertEqual(final["event"], "final")
         self.assertEqual(final["last_failure"]["category"], "model_no_action")
         self.assertEqual(final["failures"][-1]["category"], "model_no_action")
+
+    def test_visual_operation_records_completed_state(self) -> None:
+        artifacts = []
+        screenshot = {
+            "title": "Example",
+            "url": "https://example.test",
+            "mime_type": "image/png",
+            "image_base64": "abc123",
+            "image_base64_length": 6,
+        }
+
+        with (
+            mock.patch.object(runner, "_browser_worker_request", return_value=screenshot),
+            mock.patch.object(
+                runner,
+                "_call_browser_vision_model",
+                return_value={"status": "done", "summary": "target is visible", "actions": []},
+            ),
+        ):
+            output = runner.run_local_browser_visual_operation(
+                instruction="check page",
+                rounds=1,
+                artifact_callback=artifacts.append,
+            )
+
+        state_names = [item["state"] for item in artifacts if item.get("event") == "state_transition"]
+        self.assertIn("Final status: done", output)
+        self.assertIn("completed", state_names)
+        self.assertEqual(artifacts[-1]["event"], "final")
 
     def test_visual_operation_records_action_execution_failure(self) -> None:
         artifacts = []
@@ -271,9 +322,166 @@ class BrowserVisualRunnerTests(unittest.TestCase):
             )
 
         final = artifacts[-1]
+        state_names = [item["state"] for item in artifacts if item.get("event") == "state_transition"]
         self.assertIn("Final status: failed", output)
+        self.assertIn("policy_check", state_names)
+        self.assertIn("preflight", state_names)
+        self.assertIn("execute_action", state_names)
+        self.assertIn("failed", state_names)
         self.assertEqual(final["last_failure"]["category"], "action_execution_failed")
         self.assertEqual(final["last_failure"]["severity"], "error")
+
+    def test_click_forces_hit_test_and_verification_when_toggles_disabled(self) -> None:
+        artifacts = []
+        screenshot = {
+            "title": "Example",
+            "url": "https://example.test",
+            "mime_type": "image/png",
+            "image_base64": "abc123",
+            "image_base64_length": 6,
+        }
+        click_action = {
+            "action": "click",
+            "x": 500,
+            "y": 500,
+            "reason": "open comments",
+            "target_description": "Open comments button",
+            "expected_change": "comments panel opens",
+            "confidence": 0.9,
+        }
+
+        with (
+            mock.patch.object(runner, "BROWSER_VISUAL_CLICK_PREFLIGHT_ENABLED", False),
+            mock.patch.object(runner, "BROWSER_VISION_VERIFY_ENABLED", False),
+            mock.patch.object(runner, "_browser_worker_request", return_value=screenshot),
+            mock.patch.object(
+                runner,
+                "_call_browser_vision_model",
+                return_value={"status": "continue", "summary": "click comments", "actions": [click_action]},
+            ),
+            mock.patch.object(
+                runner,
+                "_run_click_hit_test",
+                return_value={
+                    "ok": True,
+                    "actionable": True,
+                    "target": {"tag": "button", "text": "Open comments", "selector": "button.comments"},
+                },
+            ) as hit_test_mock,
+            mock.patch.object(runner, "_run_visual_action", return_value={"ok": True, "result": {"backend": "browser_screen_click"}}),
+            mock.patch.object(
+                runner,
+                "_call_browser_visual_verifier",
+                return_value={
+                    "status": "done",
+                    "changed": True,
+                    "matched_expected_change": True,
+                    "misclick": False,
+                    "confidence": 0.95,
+                    "risk": "none",
+                    "summary": "comments opened",
+                },
+            ) as verifier_mock,
+        ):
+            output = runner.run_local_browser_visual_operation(
+                instruction="open comments",
+                rounds=1,
+                task_id="job-123",
+                artifact_callback=artifacts.append,
+            )
+
+        self.assertIn("Final status: done", output)
+        hit_test_mock.assert_called_once()
+        verifier_mock.assert_called_once()
+        action_artifacts = [item for item in artifacts if item.get("action_id")]
+        self.assertTrue(action_artifacts)
+        self.assertTrue(all(item.get("task_id") == "job-123" for item in artifacts))
+
+    def test_click_preflight_exception_blocks_action_execution(self) -> None:
+        artifacts = []
+        screenshot = {
+            "title": "Example",
+            "url": "https://example.test",
+            "mime_type": "image/png",
+            "image_base64": "abc123",
+            "image_base64_length": 6,
+        }
+        click_action = {
+            "action": "click",
+            "x": 500,
+            "y": 500,
+            "reason": "open comments",
+            "target_description": "Open comments button",
+            "expected_change": "comments panel opens",
+            "confidence": 0.9,
+        }
+
+        with (
+            mock.patch.object(runner, "_browser_worker_request", return_value=screenshot),
+            mock.patch.object(
+                runner,
+                "_call_browser_vision_model",
+                return_value={"status": "continue", "summary": "click comments", "actions": [click_action]},
+            ),
+            mock.patch.object(runner, "_run_click_hit_test", side_effect=RuntimeError("hit test unavailable")),
+            mock.patch.object(runner, "_run_visual_action") as action_mock,
+        ):
+            output = runner.run_local_browser_visual_operation(
+                instruction="open comments",
+                rounds=1,
+                artifact_callback=artifacts.append,
+            )
+
+        self.assertIn("Final status: failed", output)
+        action_mock.assert_not_called()
+        self.assertEqual(artifacts[-1]["last_failure"]["failure_type"], "click_preflight_unavailable")
+
+    def test_click_verification_exception_fails_after_action(self) -> None:
+        artifacts = []
+        screenshot = {
+            "title": "Example",
+            "url": "https://example.test",
+            "mime_type": "image/png",
+            "image_base64": "abc123",
+            "image_base64_length": 6,
+        }
+        click_action = {
+            "action": "click",
+            "x": 500,
+            "y": 500,
+            "reason": "open comments",
+            "target_description": "Open comments button",
+            "expected_change": "comments panel opens",
+            "confidence": 0.9,
+        }
+
+        with (
+            mock.patch.object(runner, "_browser_worker_request", return_value=screenshot),
+            mock.patch.object(
+                runner,
+                "_call_browser_vision_model",
+                return_value={"status": "continue", "summary": "click comments", "actions": [click_action]},
+            ),
+            mock.patch.object(
+                runner,
+                "_run_click_hit_test",
+                return_value={
+                    "ok": True,
+                    "actionable": True,
+                    "target": {"tag": "button", "text": "Open comments", "selector": "button.comments"},
+                },
+            ),
+            mock.patch.object(runner, "_run_visual_action", return_value={"ok": True, "result": {"backend": "browser_screen_click"}}),
+            mock.patch.object(runner, "_call_browser_visual_verifier", side_effect=RuntimeError("vision down")),
+        ):
+            output = runner.run_local_browser_visual_operation(
+                instruction="open comments",
+                rounds=1,
+                artifact_callback=artifacts.append,
+            )
+
+        self.assertIn("Final status: failed", output)
+        self.assertEqual(artifacts[-1]["last_failure"]["failure_type"], "verification_unavailable")
 
 
 if __name__ == "__main__":

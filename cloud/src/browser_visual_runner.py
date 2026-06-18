@@ -1,12 +1,11 @@
-import json
 import logging
 import re
-from contextlib import suppress
+from contextvars import ContextVar
 from typing import Callable
+from uuid import uuid4
 
-import requests
-
-from src.browser_orchestrator import browser_orchestrator, get_browser_request_timeout
+from src.browser_orchestrator import get_browser_request_timeout
+from src.browser_visual_model import _call_browser_vision_model, _call_browser_visual_verifier, _extract_json_object
 from src.browser_visual_policy import (
     classify_visual_verification,
     classify_visual_failure,
@@ -14,17 +13,15 @@ from src.browser_visual_policy import (
     normalise_visual_verification,
     visual_action_safety_issue,
 )
+from src.browser_visual_trace import format_browser_diagnostics
+from src.browser_visual_worker import _browser_worker_request, _run_click_hit_test, _run_visual_action
 from src.runtime_config import (
-    BROWSER_VISION_ACTION_MIN_CONFIDENCE,
     BROWSER_VISION_MODEL,
     BROWSER_VISION_VERIFY_ENABLED,
-    BROWSER_VISION_VERIFY_MIN_CONFIDENCE,
     BROWSER_VISUAL_CLICK_PREFLIGHT_ENABLED,
     BROWSER_VISUAL_CLICK_PREFLIGHT_MIN_SCORE,
     BROWSER_VISUAL_TRACE_MAX_IMAGE_CHARS,
     BROWSER_VISUAL_TRACE_SCREENSHOTS,
-    ONE_API_TOKEN,
-    ONE_API_URL,
 )
 
 
@@ -34,91 +31,23 @@ logger = logging.getLogger("wei_agent")
 ProgressCallback = Callable[[str], None]
 CancelCheck = Callable[[], bool]
 ArtifactCallback = Callable[[dict], None]
-
-
-def format_browser_diagnostics(payload: dict, *, max_controls: int = 18) -> list[str]:
-    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else {}
-    if not diagnostics or diagnostics.get("ok") is False:
-        return []
-
-    lines: list[str] = []
-    viewport = diagnostics.get("viewport") if isinstance(diagnostics.get("viewport"), dict) else {}
-    scroll = diagnostics.get("scroll") if isinstance(diagnostics.get("scroll"), dict) else {}
-    if viewport or scroll:
-        lines.append(
-            "Page diagnostics: "
-            f"viewport={viewport.get('width', '-')}x{viewport.get('height', '-')}, "
-            f"scrollY={scroll.get('y', '-')}/{scroll.get('height', '-')}, "
-            f"readyState={diagnostics.get('readyState', '-')}"
-        )
-
-    headings = diagnostics.get("headings") if isinstance(diagnostics.get("headings"), list) else []
-    visible_headings = [str(item).strip() for item in headings if str(item).strip()]
-    if visible_headings:
-        lines.append("Visible headings: " + " | ".join(visible_headings[:8]))
-
-    dialogs = diagnostics.get("dialogs") if isinstance(diagnostics.get("dialogs"), list) else []
-    if dialogs:
-        lines.append("Visible dialogs/overlays:")
-        for item in dialogs[:5]:
-            if not isinstance(item, dict):
-                continue
-            label = str(
-                item.get("text")
-                or item.get("ariaLabel")
-                or item.get("title")
-                or item.get("dataE2e")
-                or item.get("selector")
-                or ""
-            ).strip()
-            selector = str(item.get("selector") or "").strip()
-            if label or selector:
-                lines.append(f"- {label[:140] or '[no text]'} | selector: {selector or '-'}")
-
-    controls = diagnostics.get("controls") if isinstance(diagnostics.get("controls"), list) else []
-    if controls:
-        lines.append("Visible controls candidates:")
-        for item in controls[:max_controls]:
-            if not isinstance(item, dict):
-                continue
-            label = str(
-                item.get("text")
-                or item.get("ariaLabel")
-                or item.get("placeholder")
-                or item.get("title")
-                or item.get("dataE2e")
-                or item.get("href")
-                or ""
-            ).strip()
-            selector = str(item.get("selector") or "").strip()
-            tag = str(item.get("tag") or "element").strip()
-            role = str(item.get("role") or "").strip()
-            data_e2e = str(item.get("dataE2e") or "").strip()
-            meta = ", ".join(
-                part for part in (tag, f"role={role}" if role else "", f"data-e2e={data_e2e}" if data_e2e else "") if part
-            )
-            if label or selector:
-                lines.append(f"- {label[:160] or '[no text]'} | {meta} | selector: {selector or '-'}")
-        control_count = diagnostics.get("controlCount")
-        if isinstance(control_count, int) and control_count > max_controls:
-            lines.append(f"- ... {control_count - max_controls} more visible controls omitted")
-
-    visible_text = str(diagnostics.get("visibleText") or "").strip()
-    if visible_text:
-        lines.append("Visible page text preview:")
-        lines.append(visible_text[:1000])
-    return lines
+_CURRENT_VISUAL_TASK_ID: ContextVar[str] = ContextVar("wei_visual_task_id", default="")
 
 
 def compact_visual_screenshot(payload: dict, *, include_image: bool = True) -> dict:
     image_base64 = str(payload.get("image_base64") or "")
     image_length = int(payload.get("image_base64_length") or len(image_base64) or 0)
     compact = {
+        "request_id": str(payload.get("request_id") or "").strip(),
+        "task_id": str(payload.get("task_id") or "").strip(),
+        "action_id": str(payload.get("action_id") or "").strip(),
         "title": str(payload.get("title") or "").strip(),
         "url": str(payload.get("url") or "").strip(),
         "mime_type": str(payload.get("mime_type") or "image/png").strip() or "image/png",
         "image_optimized": bool(payload.get("image_optimized")),
         "image_base64_length": image_length,
+        "viewport": payload.get("viewport") if isinstance(payload.get("viewport"), dict) else {},
+        "device_pixel_ratio": payload.get("device_pixel_ratio"),
         "navigation": payload.get("navigation") if isinstance(payload.get("navigation"), dict) else {},
         "diagnostics": format_browser_diagnostics(payload, max_controls=8),
     }
@@ -140,6 +69,8 @@ def _compact_action_result(result: dict) -> dict:
         return {"raw": str(result)[:1200]}
     compact = {
         "ok": bool(result.get("ok")),
+        "task_id": str(result.get("task_id") or "").strip(),
+        "action_id": str(result.get("action_id") or "").strip(),
         "result": result.get("result") if isinstance(result.get("result"), dict) else {},
     }
     diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
@@ -244,8 +175,6 @@ def format_click_hit_test_summary(hit_test: dict) -> str:
 
 
 def click_hit_test_safety_issue(action: dict, hit_test: dict) -> tuple[str, float]:
-    if not BROWSER_VISUAL_CLICK_PREFLIGHT_ENABLED:
-        return "", 0.0
     if not isinstance(hit_test, dict):
         return "invalid hit-test payload", 0.0
     if not hit_test.get("ok"):
@@ -277,219 +206,60 @@ def click_hit_test_safety_issue(action: dict, hit_test: dict) -> tuple[str, floa
 def _emit_artifact(callback: ArtifactCallback | None, *, event: str, round_index: int, **payload) -> None:
     if not callback:
         return
+    task_id = str(payload.pop("task_id", "") or _CURRENT_VISUAL_TASK_ID.get() or "").strip()
     artifact = {
         "event": event,
         "round": round_index,
         **payload,
     }
+    if task_id:
+        artifact["task_id"] = task_id
     try:
         callback(artifact)
     except Exception as exc:
         logger.warning("visual artifact callback failed: %s", exc)
 
 
-def _extract_json_object(text: str) -> dict:
-    raw = (text or "").strip()
-    if not raw:
-        raise ValueError("Vision model returned empty content.")
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE).strip()
-        raw = re.sub(r"\s*```$", "", raw).strip()
-    with suppress(Exception):
-        parsed = json.loads(raw)
-        if isinstance(parsed, dict):
-            return parsed
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start >= 0 and end > start:
-        parsed = json.loads(raw[start : end + 1])
-        if isinstance(parsed, dict):
-            return parsed
-    raise ValueError("Vision model did not return a JSON object.")
-
-
-def _call_browser_vision_model(*, instruction: str, screenshot: dict, round_index: int, history: list[str]) -> dict:
-    if not ONE_API_TOKEN:
-        raise RuntimeError("ONE_API_TOKEN is not configured.")
-    image_base64 = str(screenshot.get("image_base64") or "").strip()
-    mime_type = str(screenshot.get("mime_type") or "image/png").strip() or "image/png"
-    if not image_base64:
-        raise RuntimeError("Browser screenshot is missing image data.")
-
-    diagnostic_text = "\n".join(format_browser_diagnostics(screenshot, max_controls=30)) or "[Diagnostics disabled or unavailable]"
-    page_title = str(screenshot.get("title") or "-").strip() or "-"
-    page_url = str(screenshot.get("url") or "-").strip() or "-"
-    history_text = "\n".join(history[-8:]) if history else "[No previous visual actions]"
-    prompt = (
-        "You are the cloud browser vision controller for a local browser.\n"
-        "Decide the next safe browser action from the screenshot. Diagnostics are optional helper data and may be unavailable.\n"
-        "Return JSON only. Do not use markdown.\n\n"
-        "Coordinate system:\n"
-        "- For click actions, return x and y as integers from 0 to 1000, normalized to the visible screenshot viewport.\n"
-        "- x=0 is the left edge, x=1000 is the right edge, y=0 is the top, y=1000 is the bottom.\n\n"
-        "Allowed JSON schema:\n"
-        "{\n"
-        '  "status": "continue" | "done" | "need_user",\n'
-        '  "summary": "short observation/result",\n'
-        '  "actions": [\n'
-        '    {"action": "click", "x": 500, "y": 500, "reason": "...", "target_description": "visible element to click", "expected_change": "what should change after clicking", "confidence": 0.0, "wait_ms": 1200},\n'
-        '    {"action": "scroll", "delta_y": 700, "reason": "...", "target_description": "page/feed/list", "expected_change": "new content becomes visible", "confidence": 0.0, "wait_ms": 1000},\n'
-        '    {"action": "press", "key": "Escape", "reason": "...", "target_description": "current browser/page focus", "expected_change": "modal closes or page state changes", "confidence": 0.0, "wait_ms": 500},\n'
-        '    {"action": "type_text", "text": "...", "reason": "...", "target_description": "focused input", "expected_change": "text appears in input", "confidence": 0.0, "wait_ms": 500},\n'
-        '    {"action": "wait", "reason": "...", "target_description": "page loading", "expected_change": "page settles or new content loads", "confidence": 1.0, "wait_ms": 1000}\n'
-        "  ]\n"
-        "}\n\n"
-        "Rules:\n"
-        "- Return at most one action unless typing immediately after focusing an input is clearly required.\n"
-        f"- Every non-wait action must include target_description, expected_change, and confidence. Use confidence >= {BROWSER_VISION_ACTION_MIN_CONFIDENCE:.2f} only when the visible target is clear.\n"
-        "- If the target is uncertain, do not click/type. Return wait, scroll, or need_user with a clear summary.\n"
-        "- On video-feed or card-grid pages, click the center of the intended visible video card/thumbnail, not a nearby icon or blank gutter. "
-        "Use target_description words such as video card or thumbnail when that is the intended target.\n"
-        "- Prefer done when the requested result is already visible.\n"
-        "- Use need_user for captcha, login approval, payment, purchase, irreversible posting, or ambiguous destructive actions.\n"
-        "- Do not invent hidden page state. Use the screenshot first; use diagnostics only when present.\n\n"
-        f"User instruction: {instruction}\n"
-        f"Round: {round_index}\n"
-        f"Page title: {page_title}\n"
-        f"Page URL: {page_url}\n"
-        f"Recent visual history:\n{history_text}\n\n"
-        f"Diagnostics:\n{diagnostic_text}"
-    )
-    return _post_vision_chat_completion(prompt, screenshot)
-
-
-def _post_vision_chat_completion(prompt: str, screenshot: dict) -> dict:
-    if not ONE_API_TOKEN:
-        raise RuntimeError("ONE_API_TOKEN is not configured.")
-    image_base64 = str(screenshot.get("image_base64") or "").strip()
-    mime_type = str(screenshot.get("mime_type") or "image/png").strip() or "image/png"
-    if not image_base64:
-        raise RuntimeError("Browser screenshot is missing image data.")
-
-    headers = {
-        "Authorization": f"Bearer {ONE_API_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    body = {
-        "model": BROWSER_VISION_MODEL,
-        "temperature": 0.1,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_base64}"}},
-                ],
-            }
-        ],
-    }
-    response = requests.post(f"{ONE_API_URL}/chat/completions", headers=headers, json=body, timeout=120)
-    if response.status_code in {400, 422}:
-        body.pop("response_format", None)
-        response = requests.post(f"{ONE_API_URL}/chat/completions", headers=headers, json=body, timeout=120)
-    response.raise_for_status()
-    data = response.json()
-    choices = data.get("choices") if isinstance(data, dict) else []
-    if not choices:
-        raise RuntimeError("Vision model returned no choices.")
-    message = choices[0].get("message") if isinstance(choices[0], dict) else {}
-    content = message.get("content") if isinstance(message, dict) else ""
-    if isinstance(content, list):
-        content = "\n".join(str(item.get("text") or "") for item in content if isinstance(item, dict))
-    parsed = _extract_json_object(str(content or ""))
-    parsed["model"] = BROWSER_VISION_MODEL
-    return parsed
-
-
-def _call_browser_visual_verifier(
+def _emit_state_transition(
+    artifact_callback: ArtifactCallback | None,
+    progress_callback: ProgressCallback | None,
     *,
-    instruction: str,
-    before: dict,
-    after: dict,
-    action: dict,
-    action_result: dict,
+    state: str,
     round_index: int,
-    history: list[str],
-) -> dict:
-    before_title = str(before.get("title") or "-").strip() or "-"
-    before_url = str(before.get("url") or "-").strip() or "-"
-    after_title = str(after.get("title") or "-").strip() or "-"
-    after_url = str(after.get("url") or "-").strip() or "-"
-    history_text = "\n".join(history[-10:]) if history else "[No previous visual actions]"
-    action_summary = json.dumps(
-        {
-            "action": action,
-            "result": action_result.get("result") if isinstance(action_result, dict) else action_result,
-        },
-        ensure_ascii=False,
-    )[:1600]
-    prompt = (
-        "You are verifying whether a local browser visual action worked.\n"
-        "Compare the current screenshot against the action intent and recent history.\n"
-        "Return JSON only. Do not use markdown.\n\n"
-        "Allowed JSON schema:\n"
-        "{\n"
-        '  "status": "continue" | "done" | "need_user" | "retry",\n'
-        '  "changed": true,\n'
-        '  "matched_expected_change": true,\n'
-        '  "misclick": false,\n'
-        '  "confidence": 0.0,\n'
-        '  "observed_change": "what visibly changed after the action",\n'
-        '  "risk": "none" | "low" | "medium" | "high",\n'
-        '  "summary": "short verification result",\n'
-        '  "retry_hint": "optional safer next target or strategy"\n'
-        "}\n\n"
-        "Rules:\n"
-        "- status=done when the user instruction appears satisfied in the current screenshot.\n"
-        "- status=continue when the action worked or page advanced but more steps are needed.\n"
-        "- status=retry when the action likely had no effect or missed the intended target.\n"
-        f"- If confidence is below {BROWSER_VISION_VERIFY_MIN_CONFIDENCE:.2f}, use status=retry unless the page clearly needs user help.\n"
-        "- Compare the action.expected_change against the current screenshot when it is provided.\n"
-        "- matched_expected_change must be false when the visible result does not match action.expected_change.\n"
-        "- risk=high for wrong navigation, wrong modal, destructive side effects, captcha, login approval, payment, purchase, or posting.\n"
-        "- status=need_user for captcha, login approval, payment, irreversible posting, or ambiguous destructive actions.\n"
-        "- Set misclick=true if the page moved to the wrong place, opened the wrong modal, or selected the wrong item.\n"
-        "- Do not invent hidden page state. Use the current screenshot first.\n\n"
-        f"User instruction: {instruction}\n"
-        f"Round: {round_index}\n"
-        f"Before title/url: {before_title} | {before_url}\n"
-        f"After title/url: {after_title} | {after_url}\n"
-        f"Action and execution result: {action_summary}\n"
-        f"Recent visual history:\n{history_text}"
+    status: str = "running",
+    summary: str = "",
+    **payload,
+) -> None:
+    state_name = str(state or "").strip()
+    if not state_name:
+        return
+    status_text = str(status or "running").strip() or "running"
+    summary_text = str(summary or "").strip()
+    _emit_artifact(
+        artifact_callback,
+        event="state_transition",
+        round_index=round_index,
+        state=state_name,
+        status=status_text,
+        summary=summary_text,
+        **payload,
     )
-    return _post_vision_chat_completion(prompt, after)
+    if progress_callback:
+        suffix = f": {summary_text}" if summary_text else ""
+        progress_callback(f"State {state_name}: {status_text}{suffix}")
 
 
-def _browser_worker_request(command: str, payload: dict, timeout: int | None = None) -> dict:
-    return browser_orchestrator.request(command, payload, timeout=timeout)
-
-
-def _run_visual_action(action: dict) -> dict:
-    if not isinstance(action, dict):
-        raise ValueError("Visual action must be a JSON object.")
-    action_name = str(action.get("action") or "").strip().lower()
-    if action_name not in {"click", "click_xy", "scroll", "press", "key", "type", "type_text", "wait"}:
-        raise ValueError(f"Unsupported visual action: {action_name or '<empty>'}")
-    payload = dict(action)
-    payload["action"] = action_name
-    return _browser_worker_request(
-        "browser.visual_action",
-        payload,
-        timeout=max(30, get_browser_request_timeout()),
-    )
-
-
-def _run_click_hit_test(action: dict) -> dict:
-    return _browser_worker_request(
-        "browser.hit_test",
-        {
-            "x": action.get("x"),
-            "y": action.get("y"),
-            "target_description": str(action.get("target_description") or "").strip(),
-        },
-        timeout=max(15, min(get_browser_request_timeout(), 30)),
-    )
+def _terminal_visual_state(status: str) -> str:
+    status_name = str(status or "").strip().lower()
+    if status_name == "done":
+        return "completed"
+    if status_name == "need_user":
+        return "manual_confirm"
+    if status_name == "failed":
+        return "failed"
+    if status_name == "retry":
+        return "retry"
+    return "continue"
 
 
 def run_local_browser_visual_operation(
@@ -498,6 +268,7 @@ def run_local_browser_visual_operation(
     instruction: str = "",
     rounds: int = 3,
     max_round_cap: int = 8,
+    task_id: str = "",
     progress_callback: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
     artifact_callback: ArtifactCallback | None = None,
@@ -510,6 +281,8 @@ def run_local_browser_visual_operation(
         task = "Inspect the current page visually and report what is visible."
     round_cap = max(1, min(int(max_round_cap or 8), 50))
     max_rounds = max(1, min(int(rounds or 3), round_cap))
+    visual_task_id = str(task_id or "").strip() or f"visual-task-{uuid4().hex}"
+    _CURRENT_VISUAL_TASK_ID.set(visual_task_id)
 
     history: list[str] = []
     final_status = "continue"
@@ -522,10 +295,39 @@ def run_local_browser_visual_operation(
     verification_retries = 0
     failure_events: list[dict] = []
     last_failure: dict = classify_visual_failure("none")
+    terminal_state_emitted = False
+
+    _emit_state_transition(
+        artifact_callback,
+        progress_callback,
+        state="created",
+        round_index=0,
+        status="ok",
+        summary=f"Cloud visual browser task created; rounds={max_rounds}; model={BROWSER_VISION_MODEL}",
+        max_rounds=max_rounds,
+        model=BROWSER_VISION_MODEL,
+        task_id=visual_task_id,
+    )
 
     for round_index in range(1, max_rounds + 1):
         if cancel_check and cancel_check():
             return "Visual browser operation cancelled."
+        _emit_state_transition(
+            artifact_callback,
+            progress_callback,
+            state="worker_check",
+            round_index=round_index,
+            status="running",
+            summary="Checking browser worker by requesting a screenshot.",
+        )
+        _emit_state_transition(
+            artifact_callback,
+            progress_callback,
+            state="take_screenshot",
+            round_index=round_index,
+            status="running",
+            summary="Requesting current browser screenshot.",
+        )
         try:
             screenshot = _browser_worker_request(
                 "browser.screenshot",
@@ -533,17 +335,52 @@ def run_local_browser_visual_operation(
                     "url": current_url,
                     "instruction": task,
                     "wait_ms": 1200 if round_index == 1 else 700,
+                    "task_id": visual_task_id,
                 },
                 timeout=max(60, get_browser_request_timeout()),
             )
         except Exception as exc:
             logger.warning("operate_local_browser_visual screenshot failed: %s", exc)
+            _emit_state_transition(
+                artifact_callback,
+                progress_callback,
+                state="worker_check",
+                round_index=round_index,
+                status="failed",
+                summary=str(exc),
+            )
+            _emit_state_transition(
+                artifact_callback,
+                progress_callback,
+                state="failed",
+                round_index=round_index,
+                status="failed",
+                summary=f"Visual browser operation failed while taking screenshot: {exc}",
+            )
             return f"Visual browser operation failed while taking screenshot: {exc}"
 
         current_url = ""
         current_title = str(screenshot.get("title") or current_title or "").strip()
         page_url = str(screenshot.get("url") or "").strip()
         last_diagnostics = format_browser_diagnostics(screenshot, max_controls=12)
+        _emit_state_transition(
+            artifact_callback,
+            progress_callback,
+            state="worker_check",
+            round_index=round_index,
+            status="ok",
+            summary="Browser worker responded.",
+        )
+        _emit_state_transition(
+            artifact_callback,
+            progress_callback,
+            state="take_screenshot",
+            round_index=round_index,
+            status="ok",
+            summary=f"Screenshot captured; title={current_title or '-'}",
+            title=current_title,
+            url=page_url,
+        )
         _emit_artifact(
             artifact_callback,
             event="screenshot",
@@ -558,6 +395,15 @@ def run_local_browser_visual_operation(
                 f"title={current_title or '-'}; navigation={screenshot.get('navigation', {}).get('mode', '-') if isinstance(screenshot.get('navigation'), dict) else '-'}"
             )
 
+        _emit_state_transition(
+            artifact_callback,
+            progress_callback,
+            state="vision_decide",
+            round_index=round_index,
+            status="running",
+            summary=f"Calling {BROWSER_VISION_MODEL} for the next browser decision.",
+            model=BROWSER_VISION_MODEL,
+        )
         try:
             decision = normalise_visual_decision(
                 _call_browser_vision_model(
@@ -569,17 +415,50 @@ def run_local_browser_visual_operation(
             )
         except Exception as exc:
             logger.warning("operate_local_browser_visual model failed: %s", exc)
+            _emit_state_transition(
+                artifact_callback,
+                progress_callback,
+                state="vision_decide",
+                round_index=round_index,
+                status="failed",
+                summary=str(exc),
+                model=BROWSER_VISION_MODEL,
+            )
+            _emit_state_transition(
+                artifact_callback,
+                progress_callback,
+                state="failed",
+                round_index=round_index,
+                status="failed",
+                summary=f"Visual browser operation failed while calling {BROWSER_VISION_MODEL}: {exc}",
+            )
             return f"Visual browser operation failed while calling {BROWSER_VISION_MODEL}: {exc}"
 
         final_status = str(decision.get("status") or "continue").strip().lower()
         final_summary = str(decision.get("summary") or "").strip()
+        _emit_state_transition(
+            artifact_callback,
+            progress_callback,
+            state="vision_decide",
+            round_index=round_index,
+            status=final_status,
+            summary=final_summary,
+            model=decision.get("model") or BROWSER_VISION_MODEL,
+        )
+        actions = decision.get("actions") if isinstance(decision.get("actions"), list) else []
+        for action_index, action in enumerate(actions[:2], start=1):
+            if not isinstance(action, dict):
+                continue
+            action["task_id"] = visual_task_id
+            action["action_id"] = str(action.get("action_id") or "").strip() or f"{visual_task_id}:r{round_index}:a{action_index}:{uuid4().hex[:8]}"
+
         _emit_artifact(
             artifact_callback,
             event="vision_decision",
             round_index=round_index,
             status=final_status,
             summary=final_summary,
-            actions=decision.get("actions") if isinstance(decision.get("actions"), list) else [],
+            actions=actions[:2],
             model=decision.get("model") or BROWSER_VISION_MODEL,
         )
         history.append(f"Round {round_index}: status={final_status}; summary={final_summary or '-'}; url={page_url or '-'}")
@@ -587,13 +466,31 @@ def run_local_browser_visual_operation(
             progress_callback(f"Round {round_index}: vision status={final_status}; summary={final_summary or '-'}")
 
         if final_status in {"done", "need_user"}:
+            terminal_state = _terminal_visual_state(final_status)
+            _emit_state_transition(
+                artifact_callback,
+                progress_callback,
+                state=terminal_state,
+                round_index=round_index,
+                status="ok" if terminal_state == "completed" else "pending",
+                summary=final_summary,
+            )
+            terminal_state_emitted = True
             break
 
-        actions = decision.get("actions") if isinstance(decision.get("actions"), list) else []
         if not actions:
             final_summary = final_summary or "Vision model returned no action."
             last_failure = classify_visual_failure("model_no_action", final_summary, status=final_status)
             failure_events.append(last_failure)
+            _emit_state_transition(
+                artifact_callback,
+                progress_callback,
+                state="policy_check",
+                round_index=round_index,
+                status="failed",
+                summary=final_summary,
+                failure=last_failure,
+            )
             _emit_artifact(
                 artifact_callback,
                 event="failure",
@@ -602,6 +499,16 @@ def run_local_browser_visual_operation(
             )
             if progress_callback:
                 progress_callback("Vision model returned no action; stopping.")
+            _emit_state_transition(
+                artifact_callback,
+                progress_callback,
+                state="failed",
+                round_index=round_index,
+                status="failed",
+                summary=final_summary,
+                failure=last_failure,
+            )
+            terminal_state_emitted = True
             break
 
         for action in actions[:2]:
@@ -610,10 +517,20 @@ def run_local_browser_visual_operation(
             if not isinstance(action, dict):
                 continue
             action_name = str(action.get("action") or "").strip().lower()
+            action_id = str(action.get("action_id") or "").strip()
             reason = str(action.get("reason") or "").strip()
             target_description = str(action.get("target_description") or "").strip()
             expected_change = str(action.get("expected_change") or "").strip()
             confidence = float(action.get("confidence") or 0.0)
+            _emit_state_transition(
+                artifact_callback,
+                progress_callback,
+                state="policy_check",
+                round_index=round_index,
+                status="running",
+                summary=f"Checking action safety for {action_name or '<empty>'}.",
+                action=action,
+            )
             safety_issue = visual_action_safety_issue(action)
             if safety_issue:
                 unsafe_replans += 1
@@ -629,6 +546,17 @@ def run_local_browser_visual_operation(
                     f"target={target_description or '-'}; expected={expected_change or '-'}; reason={reason or '-'}"
                 )
                 history.append(trace)
+                next_state = "manual_confirm" if unsafe_replans >= 2 else "continue"
+                _emit_state_transition(
+                    artifact_callback,
+                    progress_callback,
+                    state="policy_check",
+                    round_index=round_index,
+                    status="rejected",
+                    summary=safety_issue,
+                    failure=last_failure,
+                    action=action,
+                )
                 _emit_artifact(
                     artifact_callback,
                     event="action_blocked",
@@ -646,9 +574,39 @@ def run_local_browser_visual_operation(
                 else:
                     final_status = "continue"
                     final_summary = "Skipped a low-confidence action; replanning from a fresh screenshot."
+                _emit_state_transition(
+                    artifact_callback,
+                    progress_callback,
+                    state=next_state,
+                    round_index=round_index,
+                    status="pending" if next_state == "manual_confirm" else "ok",
+                    summary=final_summary,
+                    failure=last_failure,
+                )
+                if next_state == "manual_confirm":
+                    terminal_state_emitted = True
                 break
             unsafe_replans = 0
-            if action_name in {"click", "click_xy"} and BROWSER_VISUAL_CLICK_PREFLIGHT_ENABLED:
+            _emit_state_transition(
+                artifact_callback,
+                progress_callback,
+                state="policy_check",
+                round_index=round_index,
+                status="ok",
+                summary=f"Action allowed: {action_name or '<empty>'}.",
+                action=action,
+            )
+            if action_name in {"click", "click_xy"}:
+                _emit_state_transition(
+                    artifact_callback,
+                    progress_callback,
+                    state="preflight",
+                    round_index=round_index,
+                    status="running",
+                    summary=f"Hit-testing click target: {target_description or '-'}",
+                    action=action,
+                    action_id=action_id,
+                )
                 try:
                     hit_test = _run_click_hit_test(action)
                     hit_issue, hit_score = click_hit_test_safety_issue(action, hit_test)
@@ -658,6 +616,7 @@ def run_local_browser_visual_operation(
                         event="click_preflight",
                         round_index=round_index,
                         action=action,
+                        action_id=action_id,
                         hit_test=hit_test,
                         score=hit_score,
                         issue=hit_issue,
@@ -674,6 +633,12 @@ def run_local_browser_visual_operation(
                             hit_issue,
                             status="need_user" if click_preflight_replans >= 2 else "continue",
                             retry_count=click_preflight_replans,
+                            context={
+                                "action": action,
+                                "hit_test": hit_test,
+                                "screenshot": screenshot,
+                                "score": hit_score,
+                            },
                         )
                         failure_events.append(last_failure)
                         trace = (
@@ -681,6 +646,19 @@ def run_local_browser_visual_operation(
                             f"target={target_description or '-'}; hit={hit_summary}"
                         )
                         history.append(trace)
+                        next_state = "manual_confirm" if click_preflight_replans >= 2 else "continue"
+                        _emit_state_transition(
+                            artifact_callback,
+                            progress_callback,
+                            state="preflight",
+                            round_index=round_index,
+                            status="rejected",
+                            summary=hit_issue,
+                            score=hit_score,
+                            failure=last_failure,
+                            action=action,
+                            action_id=action_id,
+                        )
                         if progress_callback:
                             progress_callback(trace)
                         _emit_artifact(
@@ -689,6 +667,7 @@ def run_local_browser_visual_operation(
                             round_index=round_index,
                             failure=last_failure,
                             action=action,
+                            action_id=action_id,
                             trace=trace,
                         )
                         if click_preflight_replans >= 2:
@@ -697,30 +676,110 @@ def run_local_browser_visual_operation(
                         else:
                             final_status = "continue"
                             final_summary = "Click preflight rejected the target; replanning from a fresh screenshot."
+                        _emit_state_transition(
+                            artifact_callback,
+                            progress_callback,
+                            state=next_state,
+                            round_index=round_index,
+                            status="pending" if next_state == "manual_confirm" else "ok",
+                            summary=final_summary,
+                            failure=last_failure,
+                            action_id=action_id,
+                        )
+                        if next_state == "manual_confirm":
+                            terminal_state_emitted = True
                         break
                     click_preflight_replans = 0
+                    _emit_state_transition(
+                        artifact_callback,
+                        progress_callback,
+                        state="preflight",
+                        round_index=round_index,
+                        status="ok",
+                        summary=hit_summary,
+                        score=hit_score,
+                        action=action,
+                        action_id=action_id,
+                    )
                 except Exception as exc:
                     logger.warning("visual click preflight failed: %s", exc)
                     preflight_failure = classify_visual_failure(
                         "click_preflight_unavailable",
                         str(exc),
-                        status="continue",
+                        status="failed",
+                    )
+                    last_failure = preflight_failure
+                    failure_events.append(last_failure)
+                    final_status = "failed"
+                    final_summary = f"Click preflight failed; click was not executed: {exc}"
+                    _emit_state_transition(
+                        artifact_callback,
+                        progress_callback,
+                        state="preflight",
+                        round_index=round_index,
+                        status="failed",
+                        summary=final_summary,
+                        failure=preflight_failure,
+                        action=action,
+                        action_id=action_id,
                     )
                     _emit_artifact(
                         artifact_callback,
                         event="click_preflight_failed",
                         round_index=round_index,
                         action=action,
+                        action_id=action_id,
                         error=str(exc),
                         failure=preflight_failure,
                     )
+                    _emit_artifact(
+                        artifact_callback,
+                        event="failure",
+                        round_index=round_index,
+                        failure=last_failure,
+                        action=action,
+                        action_id=action_id,
+                    )
+                    _emit_state_transition(
+                        artifact_callback,
+                        progress_callback,
+                        state="failed",
+                        round_index=round_index,
+                        status="failed",
+                        summary=final_summary,
+                        failure=last_failure,
+                        action_id=action_id,
+                    )
+                    terminal_state_emitted = True
                     if progress_callback:
-                        progress_callback(f"Click preflight unavailable; continuing with visual action: {exc}")
+                        progress_callback(final_summary)
+                    break
+            else:
+                _emit_state_transition(
+                    artifact_callback,
+                    progress_callback,
+                    state="preflight",
+                    round_index=round_index,
+                    status="skipped",
+                    summary="Preflight is only required for visual click actions.",
+                    action=action,
+                    action_id=action_id,
+                )
             if progress_callback:
                 progress_callback(
                     f"Executing visual action: {action_name or '<empty>'}; confidence={confidence:.2f}; "
                     f"target={target_description or '-'}; expected={expected_change or '-'}; reason={reason or '-'}"
                 )
+            _emit_state_transition(
+                artifact_callback,
+                progress_callback,
+                state="execute_action",
+                round_index=round_index,
+                status="running",
+                summary=f"Executing {action_name or '<empty>'}.",
+                action=action,
+                action_id=action_id,
+            )
             try:
                 result = _run_visual_action(action)
             except Exception as exc:
@@ -737,6 +796,28 @@ def run_local_browser_visual_operation(
                 )
                 final_status = "failed"
                 final_summary = f"Visual action failed: {exc}"
+                _emit_state_transition(
+                    artifact_callback,
+                    progress_callback,
+                    state="execute_action",
+                    round_index=round_index,
+                    status="failed",
+                    summary=final_summary,
+                    failure=last_failure,
+                    action=action,
+                    action_id=action_id,
+                )
+                _emit_state_transition(
+                    artifact_callback,
+                    progress_callback,
+                    state="failed",
+                    round_index=round_index,
+                    status="failed",
+                    summary=final_summary,
+                    failure=last_failure,
+                    action_id=action_id,
+                )
+                terminal_state_emitted = True
                 break
             action_result = result.get("result") if isinstance(result.get("result"), dict) else {}
             backend = str(action_result.get("backend") or "").strip()
@@ -756,16 +837,48 @@ def run_local_browser_visual_operation(
                 event="action_result",
                 round_index=round_index,
                 action=action,
+                action_id=action_id,
                 result=_compact_action_result(result),
                 trace=trace,
+            )
+            _emit_state_transition(
+                artifact_callback,
+                progress_callback,
+                state="execute_action",
+                round_index=round_index,
+                status="ok",
+                summary=trace,
+                action=action,
+                action_id=action_id,
+                result=_compact_action_result(result),
             )
             if progress_callback:
                 progress_callback(trace)
 
-            if not BROWSER_VISION_VERIFY_ENABLED:
+            if not BROWSER_VISION_VERIFY_ENABLED and action_name not in {"click", "click_xy"}:
+                _emit_state_transition(
+                    artifact_callback,
+                    progress_callback,
+                    state="verify_action",
+                    round_index=round_index,
+                    status="skipped",
+                    summary="Action verification is disabled.",
+                    action=action,
+                    action_id=action_id,
+                )
                 continue
             if cancel_check and cancel_check():
                 return "Visual browser operation cancelled."
+            _emit_state_transition(
+                artifact_callback,
+                progress_callback,
+                state="verify_action",
+                round_index=round_index,
+                status="running",
+                summary="Taking post-action screenshot and verifying expected change.",
+                action=action,
+                action_id=action_id,
+            )
             try:
                 verification_screenshot = _browser_worker_request(
                     "browser.screenshot",
@@ -773,6 +886,8 @@ def run_local_browser_visual_operation(
                         "url": "",
                         "instruction": f"Verify action result for: {task}",
                         "wait_ms": 400,
+                        "task_id": visual_task_id,
+                        "action_id": action_id,
                     },
                     timeout=max(60, get_browser_request_timeout()),
                 )
@@ -791,11 +906,64 @@ def run_local_browser_visual_operation(
                     artifact_callback,
                     event="verification_screenshot",
                     round_index=round_index,
+                    action_id=action_id,
                     screenshot=compact_visual_screenshot(verification_screenshot),
                 )
             except Exception as exc:
                 logger.warning("operate_local_browser_visual verification failed: %s", exc)
                 history.append(f"Verification failed: {exc}")
+                if action_name in {"click", "click_xy"}:
+                    last_failure = classify_visual_failure(
+                        "verification_unavailable",
+                        str(exc),
+                        status="failed",
+                    )
+                    failure_events.append(last_failure)
+                    final_status = "failed"
+                    final_summary = f"Click verification failed after action: {exc}"
+                    _emit_artifact(
+                        artifact_callback,
+                        event="failure",
+                        round_index=round_index,
+                        failure=last_failure,
+                        action=action,
+                        action_id=action_id,
+                    )
+                    _emit_state_transition(
+                        artifact_callback,
+                        progress_callback,
+                        state="verify_action",
+                        round_index=round_index,
+                        status="failed",
+                        summary=final_summary,
+                        failure=last_failure,
+                        action=action,
+                        action_id=action_id,
+                    )
+                    _emit_state_transition(
+                        artifact_callback,
+                        progress_callback,
+                        state="failed",
+                        round_index=round_index,
+                        status="failed",
+                        summary=final_summary,
+                        failure=last_failure,
+                        action_id=action_id,
+                    )
+                    terminal_state_emitted = True
+                    if progress_callback:
+                        progress_callback(final_summary)
+                    break
+                _emit_state_transition(
+                    artifact_callback,
+                    progress_callback,
+                    state="verify_action",
+                    round_index=round_index,
+                    status="warning",
+                    summary=f"Verification failed: {exc}",
+                    action=action,
+                    action_id=action_id,
+                )
                 if progress_callback:
                     progress_callback(f"Verification failed: {exc}")
                 continue
@@ -815,7 +983,19 @@ def run_local_browser_visual_operation(
                 event="verification",
                 round_index=round_index,
                 verification=verification,
+                action_id=action_id,
                 trace=verify_trace,
+            )
+            _emit_state_transition(
+                artifact_callback,
+                progress_callback,
+                state="verify_action",
+                round_index=round_index,
+                status=verify_status,
+                summary=verify_summary,
+                action=action,
+                action_id=action_id,
+                verification=verification,
             )
             if progress_callback:
                 progress_callback(verify_trace)
@@ -832,6 +1012,13 @@ def run_local_browser_visual_operation(
                 policy_reason,
                 status=policy_status,
                 retry_count=verification_retries + 1,
+                context={
+                    "action": action,
+                    "action_result": result,
+                    "verification": verification,
+                    "before": screenshot,
+                    "after": verification_screenshot,
+                },
             )
             policy_trace = f"Verification policy: status={policy_status}; reason={policy_reason or '-'}"
             history.append(policy_trace)
@@ -842,6 +1029,7 @@ def run_local_browser_visual_operation(
                 status=policy_status,
                 reason=policy_reason,
                 failure=verification_failure,
+                action_id=action_id,
             )
             if progress_callback:
                 progress_callback(policy_trace)
@@ -853,6 +1041,17 @@ def run_local_browser_visual_operation(
                 retry_hint = str(verification.get("retry_hint") or "").strip()
                 final_summary = policy_reason or verify_summary or "Visual verification suggested retry."
                 history.append("Verification requested retry; replanning from the next screenshot.")
+                _emit_state_transition(
+                    artifact_callback,
+                    progress_callback,
+                    state="retry",
+                    round_index=round_index,
+                    status="ok",
+                    summary=final_summary,
+                    failure=last_failure,
+                    retry_hint=retry_hint,
+                    action_id=action_id,
+                )
                 if progress_callback:
                     progress_callback("Verification requested retry; replanning from the next screenshot.")
                 if retry_hint:
@@ -867,7 +1066,28 @@ def run_local_browser_visual_operation(
                 if policy_status == "need_user":
                     last_failure = verification_failure
                     failure_events.append(last_failure)
+                terminal_state = _terminal_visual_state(policy_status)
+                _emit_state_transition(
+                    artifact_callback,
+                    progress_callback,
+                    state=terminal_state,
+                    round_index=round_index,
+                    status="ok" if terminal_state == "completed" else "pending",
+                    summary=final_summary,
+                    failure=verification_failure if terminal_state == "manual_confirm" else {},
+                    action_id=action_id,
+                )
+                terminal_state_emitted = True
                 break
+            _emit_state_transition(
+                artifact_callback,
+                progress_callback,
+                state="continue",
+                round_index=round_index,
+                status="ok",
+                summary=policy_reason or verify_summary or "Action verified; continuing if more steps are needed.",
+                action_id=action_id,
+            )
 
         if final_status == "failed":
             break
@@ -876,6 +1096,7 @@ def run_local_browser_visual_operation(
 
     lines = [
         f"Visual browser model: {BROWSER_VISION_MODEL}",
+        f"Task ID: {visual_task_id}",
         f"Final status: {final_status or 'continue'}",
         f"Page title: {current_title or '-'}",
     ]
@@ -884,7 +1105,7 @@ def run_local_browser_visual_operation(
     if last_failure.get("category") != "none":
         lines.append(
             "Last failure: "
-            f"category={last_failure.get('category')}; "
+            f"failure_type={last_failure.get('failure_type') or last_failure.get('category')}; "
             f"severity={last_failure.get('severity')}; "
             f"recoverable={last_failure.get('recoverable')}; "
             f"reason={last_failure.get('reason') or '-'}"
@@ -895,6 +1116,16 @@ def run_local_browser_visual_operation(
     if last_diagnostics:
         lines.append("Last page diagnostics:")
         lines.extend(last_diagnostics[:18])
+    if not terminal_state_emitted:
+        _emit_state_transition(
+            artifact_callback,
+            progress_callback,
+            state=_terminal_visual_state(final_status),
+            round_index=max_rounds,
+            status="ok" if final_status == "done" else ("failed" if final_status == "failed" else "pending" if final_status == "need_user" else "ok"),
+            summary=final_summary,
+            last_failure=last_failure,
+        )
     _emit_artifact(
         artifact_callback,
         event="final",

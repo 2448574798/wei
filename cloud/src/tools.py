@@ -2,7 +2,6 @@ import logging
 import os
 import re
 import smtplib
-import time
 from contextlib import suppress
 from email.header import Header
 from email.mime.multipart import MIMEMultipart
@@ -17,7 +16,7 @@ from src.browser_orchestrator import (
 from src.browser_visual_runner import format_browser_diagnostics, run_local_browser_visual_operation
 from src.execution_context import emit_runtime_event_sync, get_execution_context
 from src.human_loop import confirmation_store
-from src.local_jobs import local_job_store
+from src.job_store import cloud_job_store
 from src.open_interpreter_client import (
     open_interpreter_is_configured,
     run_open_interpreter,
@@ -76,52 +75,6 @@ def decode_meta_payload(text: str) -> dict | None:
 
 def _browser_worker_request(command: str, payload: dict, timeout: int | None = None) -> dict:
     return browser_orchestrator.request(command, payload, timeout=timeout)
-
-
-def _run_worker_watch_text_job(
-    local_job_id: str,
-    *,
-    url: str,
-    keyword: str,
-    rounds: int,
-    interval_sec: int,
-    wait_ms: int,
-) -> str:
-    lowered_keyword = keyword.lower()
-    for index in range(rounds):
-        if local_job_store.is_cancel_requested(local_job_id):
-            return "Local webpage watch cancelled."
-
-        snapshot = _browser_worker_request(
-            "browser.snapshot",
-            {
-                "url": url,
-                "instruction": keyword,
-                "wait_ms": wait_ms,
-            },
-            timeout=max(30, get_browser_request_timeout()),
-        )
-        title = str(snapshot.get("title") or "").strip()
-        current_url = str(snapshot.get("url") or url).strip()
-        text = str(snapshot.get("text") or "").strip()
-        excerpt = text[:240] or "[No body text extracted]"
-        local_job_store.append_progress(local_job_id, f"Round {index + 1}: {excerpt}")
-
-        manual_notice = _manual_verification_message(title, text, current_url)
-        if manual_notice:
-            raise RuntimeError(f"{manual_notice} Page URL: {current_url}")
-
-        if lowered_keyword in text.lower():
-            local_job_store.append_progress(local_job_id, f"Matched keyword: {keyword}")
-            return f"Matched keyword: {keyword}\n{text[:2000]}"
-
-        if index < rounds - 1:
-            time.sleep(interval_sec)
-
-    local_job_store.append_progress(local_job_id, f"Keyword not found: {keyword}")
-    return f"Keyword not found: {keyword}"
-
-
 
 
 def online_research(question: str) -> str:
@@ -187,7 +140,7 @@ def request_human_confirmation(question: str, context: str = "") -> str:
 def start_open_interpreter_job(code: str, language: str = "python", title: str = "Local long task") -> str:
     """Start a long-running local Open Interpreter job and return a job id immediately."""
     runtime = get_execution_context()
-    job = local_job_store.create(
+    job = cloud_job_store.create(
         title=title,
         thread_id=runtime.get("thread_id", ""),
         user_id=runtime.get("user_id"),
@@ -198,18 +151,18 @@ def start_open_interpreter_job(code: str, language: str = "python", title: str =
     def progress_callback(chunk: str) -> None:
         summary = summarize_console_chunk(chunk)
         if summary:
-            local_job_store.append_progress(job_id, summary)
+            cloud_job_store.append_progress(job_id, summary)
 
-    local_job_store.run_in_background(
+    cloud_job_store.run_in_background(
         job_id,
         run_open_interpreter,
         code,
         language=language,
         progress_callback=progress_callback,
-        cancel_check=lambda: local_job_store.is_cancel_requested(job_id),
+        cancel_check=lambda: cloud_job_store.is_cancel_requested(job_id),
     )
-    emit_runtime_event_sync("job_created", {"job": local_job_store.get(job_id)})
-    return encode_meta_payload({"kind": "job_created", "job": local_job_store.get(job_id)})
+    emit_runtime_event_sync("job_created", {"job": cloud_job_store.get(job_id)})
+    return encode_meta_payload({"kind": "job_created", "job": cloud_job_store.get(job_id)})
 
 
 def send_email(to: str, subject: str, body: str) -> str:
@@ -348,21 +301,20 @@ def inspect_local_webpage(url: str, instruction: str = "") -> str:
 def operate_local_browser_visual(url: str = "", instruction: str = "", rounds: int = 3) -> str:
     """Operate the local browser with screenshot-based visual recognition.
 
-    The cloud side sends local browser screenshots to BROWSER_VISION_MODEL
-    (defaulting to gpt-4o) and executes the returned safe visual actions
-    through the websocket browser worker. Prefer start_local_browser_visual_job
-    for tasks that may take more than a few visual rounds.
+    Cloud orchestrator owns the loop:
+    screenshot -> vision decision -> preflight -> single worker action -> verification.
+    The local thin worker only executes the one-step action sent over websocket.
     """
     return run_local_browser_visual_operation(url=url, instruction=instruction, rounds=rounds)
 
 
-def start_local_browser_visual_job(
+def start_cloud_browser_visual_job(
     instruction: str,
     url: str = "",
-    title: str = "Local browser visual task",
+    title: str = "Cloud browser visual task",
     rounds: int = 6,
 ) -> str:
-    """Start a long-running screenshot-based local browser operation job."""
+    """Start a cloud-owned Redis job for screenshot-based local browser operation."""
     task = (instruction or "").strip()
     if not task:
         return "Visual browser instruction cannot be empty."
@@ -373,82 +325,34 @@ def start_local_browser_visual_job(
 
     runtime = get_execution_context()
     try:
-        job = local_job_store.create(
+        job = cloud_job_store.create(
             title=title,
             thread_id=runtime.get("thread_id", ""),
             user_id=runtime.get("user_id"),
             username=runtime.get("username", ""),
         )
     except Exception as exc:
-        logger.warning("start_local_browser_visual_job creation failed: %s", exc)
-        return f"Start local browser visual job failed: {exc}"
+        logger.warning("start_cloud_browser_visual_job creation failed: %s", exc)
+        return f"Start cloud browser visual job failed: {exc}"
 
     job_id = job["id"]
-    local_job_store.append_progress(job_id, f"Created visual browser job: rounds={max_rounds}; model={BROWSER_VISION_MODEL}")
+    cloud_job_store.append_progress(job_id, f"Created cloud visual browser job: rounds={max_rounds}; model={BROWSER_VISION_MODEL}")
     if not browser_worker_is_configured():
-        local_job_store.fail(job_id, "Browser Worker websocket mode is disabled.")
-        return "Start local browser visual job failed: Browser Worker websocket mode is disabled."
+        cloud_job_store.fail(job_id, "Browser Worker websocket mode is disabled.")
+        return "Start cloud browser visual job failed: Browser Worker websocket mode is disabled."
 
-    local_job_store.run_in_background(
+    cloud_job_store.run_in_background(
         job_id,
         run_local_browser_visual_operation,
         url=target_url,
         instruction=task,
         rounds=max_rounds,
         max_round_cap=20,
-        progress_callback=lambda message: local_job_store.append_progress(job_id, message),
-        cancel_check=lambda: local_job_store.is_cancel_requested(job_id),
-        artifact_callback=lambda artifact: local_job_store.append_artifact(job_id, artifact),
+        task_id=job_id,
+        progress_callback=lambda message: cloud_job_store.append_progress(job_id, message),
+        cancel_check=lambda: cloud_job_store.is_cancel_requested(job_id),
+        artifact_callback=lambda artifact: cloud_job_store.append_artifact(job_id, artifact),
     )
-    local_job_store.append_progress(job_id, "Visual browser job started.")
-    emit_runtime_event_sync("job_created", {"job": local_job_store.get(job_id)})
-    return encode_meta_payload({"kind": "job_created", "job": local_job_store.get(job_id)})
-
-
-def start_local_webpage_monitor(
-    url: str,
-    keyword: str,
-    title: str = "Local webpage watch",
-    rounds: int = 20,
-    interval_sec: int = 8,
-) -> str:
-    """Start a local browser watch job and mirror it into the server-side local job store."""
-    target_url = (url or "").strip()
-    watch_keyword = (keyword or "").strip()
-    if not target_url:
-        return "Local webpage URL cannot be empty."
-    if not watch_keyword:
-        return "Keyword cannot be empty."
-    if not re.match(r"^https?://", target_url, re.IGNORECASE):
-        target_url = "https://" + target_url
-
-    rounds = max(1, min(int(rounds or 20), 200))
-    interval_sec = max(2, min(int(interval_sec or 8), 300))
-
-    runtime = get_execution_context()
-    job = local_job_store.create(
-        title=title,
-        thread_id=runtime.get("thread_id", ""),
-        user_id=runtime.get("user_id"),
-        username=runtime.get("username", ""),
-    )
-    local_job_id = job["id"]
-    local_job_store.append_progress(local_job_id, f"Created local webpage watch job for keyword: {watch_keyword}")
-
-    if not browser_worker_is_configured():
-        local_job_store.fail(local_job_id, "Browser Worker websocket mode is disabled.")
-        return "Start local webpage watch failed: Browser Worker websocket mode is disabled."
-
-    local_job_store.run_in_background(
-        local_job_id,
-        _run_worker_watch_text_job,
-        local_job_id,
-        url=target_url,
-        keyword=watch_keyword,
-        rounds=rounds,
-        interval_sec=interval_sec,
-        wait_ms=3000,
-    )
-    local_job_store.append_progress(local_job_id, "Browser worker text watch started.")
-    emit_runtime_event_sync("job_created", {"job": local_job_store.get(local_job_id)})
-    return encode_meta_payload({"kind": "job_created", "job": local_job_store.get(local_job_id)})
+    cloud_job_store.append_progress(job_id, "Cloud orchestrator started visual browser loop.")
+    emit_runtime_event_sync("job_created", {"job": cloud_job_store.get(job_id)})
+    return encode_meta_payload({"kind": "job_created", "job": cloud_job_store.get(job_id)})

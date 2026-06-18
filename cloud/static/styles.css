@@ -871,6 +871,136 @@
             background: rgba(15, 23, 42, 0.42);
         }
 
+        .visual-trace-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .visual-trace-overview {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            justify-content: flex-end;
+        }
+
+        .visual-trace-overview span,
+        .job-trace-badge {
+            border-radius: 999px;
+            background: rgba(37, 99, 235, 0.08);
+            color: var(--primary-strong);
+            padding: 3px 7px;
+            font-size: 10.5px;
+            font-weight: 800;
+            letter-spacing: 0.01em;
+        }
+
+        .job-trace-timeline {
+            position: relative;
+            display: grid;
+            gap: 10px;
+            margin-top: 10px;
+            max-height: 620px;
+            overflow: auto;
+            padding-left: 16px;
+        }
+
+        .job-trace-timeline::before {
+            content: "";
+            position: absolute;
+            left: 5px;
+            top: 4px;
+            bottom: 4px;
+            width: 2px;
+            background: linear-gradient(180deg, rgba(37, 99, 235, 0.34), rgba(148, 163, 184, 0.16));
+            border-radius: 999px;
+        }
+
+        .job-trace-item {
+            position: relative;
+            display: grid;
+            grid-template-columns: 0 minmax(0, 1fr);
+            gap: 10px;
+        }
+
+        .job-trace-marker {
+            position: absolute;
+            left: -15px;
+            top: 12px;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #94a3b8;
+            box-shadow: 0 0 0 4px rgba(148, 163, 184, 0.16);
+            z-index: 1;
+        }
+
+        .job-trace-body {
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.48);
+            padding: 9px;
+        }
+
+        [data-theme="dark"] .job-trace-body {
+            background: rgba(15, 23, 42, 0.44);
+        }
+
+        .job-trace-item.ok .job-trace-marker {
+            background: var(--success);
+            box-shadow: 0 0 0 4px rgba(22, 163, 74, 0.14);
+        }
+
+        .job-trace-item.warn .job-trace-marker,
+        .job-trace-item.running .job-trace-marker {
+            background: #d97706;
+            box-shadow: 0 0 0 4px rgba(217, 119, 6, 0.15);
+        }
+
+        .job-trace-item.error .job-trace-marker {
+            background: var(--danger);
+            box-shadow: 0 0 0 4px rgba(220, 38, 38, 0.14);
+        }
+
+        .job-trace-item.error .job-trace-body {
+            border-color: rgba(220, 38, 38, 0.28);
+            background: rgba(254, 242, 242, 0.62);
+        }
+
+        [data-theme="dark"] .job-trace-item.error .job-trace-body {
+            background: rgba(127, 29, 29, 0.22);
+        }
+
+        .job-trace-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+            margin: 0 0 6px;
+        }
+
+        .job-trace-badge.error {
+            background: rgba(220, 38, 38, 0.10);
+            color: var(--danger);
+        }
+
+        .job-trace-badge.warn {
+            background: rgba(217, 119, 6, 0.10);
+            color: #b45309;
+        }
+
+        .job-trace-hint {
+            margin-top: 6px;
+            border-left: 3px solid rgba(37, 99, 235, 0.34);
+            padding: 5px 8px;
+            color: var(--muted);
+            font-size: 11.5px;
+            line-height: 1.45;
+            background: rgba(37, 99, 235, 0.06);
+            border-radius: 8px;
+        }
+
         .job-artifact-head {
             display: flex;
             justify-content: space-between;
