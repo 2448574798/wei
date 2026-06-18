@@ -647,6 +647,8 @@ function visualTraceTitle(item) {
     if (event === "state_transition") return item.state ? `State · ${item.state}` : "State";
     if (event === "vision_decision") return "Vision Decision";
     if (event === "click_preflight") return "Click Preflight";
+    if (event === "click_preflight_retry") return "Click Preflight Retry";
+    if (event === "click_preflight_retry_failed") return "Click Retry Failed";
     if (event === "click_preflight_failed") return "Click Preflight Failed";
     if (event === "action_result") return "Action Result";
     if (event === "verification_screenshot") return "Verification Screenshot";
@@ -738,6 +740,21 @@ function summarizeVisualArtifact(item) {
             item.issue ? `issue=${item.issue}` : "",
             beforeState || afterState ? `state=${beforeState || "-"} -> ${afterState || "-"}` : "",
             item.summary || "",
+        ].filter(Boolean).join("; ");
+    }
+    if (event === "click_preflight_retry") {
+        return [
+            item.action_id ? `action_id=${item.action_id}` : "",
+            item.strategy ? `strategy=${item.strategy}` : "",
+            item.reason ? `reason=${item.reason}` : "",
+            item.detail || "",
+        ].filter(Boolean).join("; ");
+    }
+    if (event === "click_preflight_retry_failed") {
+        return [
+            item.action_id ? `action_id=${item.action_id}` : "",
+            item.strategy ? `strategy=${item.strategy}` : "",
+            item.error ? `error=${item.error}` : "",
         ].filter(Boolean).join("; ");
     }
     if (event === "click_preflight_failed") {

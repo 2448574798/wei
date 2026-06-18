@@ -238,6 +238,81 @@ def _hit_test_looks_like_video_card(hit_test: dict) -> bool:
     return False
 
 
+def _candidate_text_chunks(candidate: dict) -> list[str]:
+    if not isinstance(candidate, dict):
+        return []
+    chunks: list[str] = []
+    for key in ("label", "text", "ariaLabel", "title", "dataE2e", "href", "selector", "className", "role", "tag"):
+        value = str(candidate.get(key) or "").strip()
+        if value:
+            chunks.append(value)
+    return chunks
+
+
+def candidate_match_score(target_description: str, candidate: dict) -> float:
+    expected = _match_tokens(target_description)
+    if not expected:
+        return 0.0
+    observed = _match_tokens(" ".join(_candidate_text_chunks(candidate)))
+    if not observed:
+        return 0.0
+    return len(expected & observed) / max(1, len(expected))
+
+
+def build_click_retry_action(action: dict, screenshot: dict, hit_issue: str) -> tuple[dict | None, str]:
+    if not isinstance(action, dict) or not isinstance(screenshot, dict) or action.get("_preflight_retry"):
+        return None, ""
+    candidates = screenshot.get("action_candidates") if isinstance(screenshot.get("action_candidates"), list) else []
+    if not candidates:
+        return None, ""
+
+    target_description = str(action.get("target_description") or "").strip()
+    scored: list[tuple[float, dict]] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or not str(candidate.get("candidate_id") or "").strip():
+            continue
+        score = candidate_match_score(target_description, candidate)
+        if _is_generic_video_card_target(target_description):
+            text = " ".join(_candidate_text_chunks(candidate)).lower()
+            rect = candidate.get("rect") if isinstance(candidate.get("rect"), dict) else {}
+            try:
+                area = int(rect.get("width") or 0) * int(rect.get("height") or 0)
+            except Exception:
+                area = 0
+            if any(word in text for word in ("video", "card", "feed", "waterfall", "item", "thumbnail", "视频", "卡片", "封面")):
+                score = max(score, 0.72)
+            elif area > 18000:
+                score = max(score, 0.55)
+        if score > 0:
+            scored.append((score, candidate))
+
+    if not scored:
+        return None, ""
+    scored.sort(key=lambda item: item[0], reverse=True)
+    best_score, best_candidate = scored[0]
+    min_score = 0.55 if _is_generic_video_card_target(target_description) else max(0.34, BROWSER_VISUAL_CLICK_PREFLIGHT_MIN_SCORE)
+    if best_score < min_score:
+        return None, ""
+
+    retry_action = dict(action)
+    retry_action["candidate_id"] = str(best_candidate.get("candidate_id") or "").strip()
+    center = best_candidate.get("center") if isinstance(best_candidate.get("center"), dict) else {}
+    if center.get("normalizedX") is not None and center.get("normalizedY") is not None:
+        retry_action["x"] = int(center.get("normalizedX") or 0)
+        retry_action["y"] = int(center.get("normalizedY") or 0)
+    retry_action["_preflight_retry"] = True
+    retry_action["_retry_strategy"] = "candidate_match"
+    retry_action["_retry_reason"] = str(hit_issue or "").strip()
+    retry_action["_retry_candidate_score"] = round(best_score, 3)
+    if not retry_action.get("target_description"):
+        retry_action["target_description"] = str(best_candidate.get("label") or "").strip()
+    detail = (
+        f"candidate_match score={best_score:.2f}; candidate={retry_action['candidate_id']}; "
+        f"label={str(best_candidate.get('label') or '-')[:120]}"
+    )
+    return retry_action, detail
+
+
 def format_click_hit_test_summary(hit_test: dict) -> str:
     if not isinstance(hit_test, dict):
         return "invalid hit-test payload"
@@ -723,70 +798,148 @@ def run_local_browser_visual_operation(
                             f"Click preflight: score={hit_score:.2f}; issue={hit_issue or '-'}; {hit_summary}"
                     )
                     if hit_issue:
-                        click_preflight_replans += 1
-                        last_failure = classify_visual_failure(
-                            "click_preflight",
-                            hit_issue,
-                            status="need_user" if click_preflight_replans >= 2 else "continue",
-                            retry_count=click_preflight_replans,
-                            context={
-                                "action": action,
-                                "hit_test": hit_test,
-                                "screenshot": screenshot,
-                                "score": hit_score,
-                                "page_state_before": screenshot.get("page_state") if isinstance(screenshot.get("page_state"), dict) else {},
-                                "page_state_after": hit_test.get("page_state") if isinstance(hit_test.get("page_state"), dict) else {},
-                            },
-                        )
-                        failure_events.append(last_failure)
-                        trace = (
-                            f"Skipped visual click after preflight: issue={hit_issue}; score={hit_score:.2f}; "
-                            f"target={target_description or '-'}; hit={hit_summary}"
-                        )
-                        history.append(trace)
-                        next_state = "manual_confirm" if click_preflight_replans >= 2 else "continue"
-                        _emit_state_transition(
-                            artifact_callback,
-                            progress_callback,
-                            state="preflight",
-                            round_index=round_index,
-                            status="rejected",
-                            summary=hit_issue,
-                            score=hit_score,
-                            failure=last_failure,
-                            action=action,
-                            action_id=action_id,
-                        )
-                        if progress_callback:
-                            progress_callback(trace)
-                        _emit_artifact(
-                            artifact_callback,
-                            event="failure",
-                            round_index=round_index,
-                            failure=last_failure,
-                            action=action,
-                            action_id=action_id,
-                            trace=trace,
-                        )
-                        if click_preflight_replans >= 2:
-                            final_status = "need_user"
-                            final_summary = "Click preflight could not confirm a safe target."
+                        retry_action, retry_detail = build_click_retry_action(action, screenshot, hit_issue)
+                        if retry_action:
+                            _emit_artifact(
+                                artifact_callback,
+                                event="click_preflight_retry",
+                                round_index=round_index,
+                                action=retry_action,
+                                action_id=action_id,
+                                strategy=retry_action.get("_retry_strategy"),
+                                reason=retry_action.get("_retry_reason"),
+                                detail=retry_detail,
+                            )
+                            if progress_callback:
+                                progress_callback(f"Click preflight retry: {retry_detail}")
+                            try:
+                                retry_hit_test = _run_click_hit_test(retry_action)
+                                retry_state_drift_issue = page_state_drift_issue(screenshot, retry_hit_test)
+                                retry_issue, retry_score = click_hit_test_safety_issue(retry_action, retry_hit_test)
+                                if retry_state_drift_issue:
+                                    retry_issue = retry_state_drift_issue
+                                    retry_score = 0.0
+                                retry_summary = format_click_hit_test_summary(retry_hit_test)
+                                _emit_artifact(
+                                    artifact_callback,
+                                    event="click_preflight",
+                                    round_index=round_index,
+                                    action=retry_action,
+                                    action_id=action_id,
+                                    hit_test=retry_hit_test,
+                                    page_state_before=compact_page_state(
+                                        screenshot.get("page_state") if isinstance(screenshot.get("page_state"), dict) else {}
+                                    ),
+                                    page_state_after=compact_page_state(
+                                        retry_hit_test.get("page_state") if isinstance(retry_hit_test.get("page_state"), dict) else {}
+                                    ),
+                                    score=retry_score,
+                                    issue=retry_issue,
+                                    summary=retry_summary,
+                                    retry=True,
+                                )
+                                if progress_callback:
+                                    progress_callback(
+                                        f"Click preflight retry result: score={retry_score:.2f}; issue={retry_issue or '-'}; {retry_summary}"
+                                    )
+                                if not retry_issue:
+                                    action = retry_action
+                                    target_description = str(action.get("target_description") or "").strip()
+                                    expected_change = str(action.get("expected_change") or "").strip()
+                                    hit_issue = ""
+                                    hit_score = retry_score
+                                    hit_test = retry_hit_test
+                                    hit_summary = retry_summary
+                            except Exception as retry_exc:
+                                _emit_artifact(
+                                    artifact_callback,
+                                    event="click_preflight_retry_failed",
+                                    round_index=round_index,
+                                    action=retry_action,
+                                    action_id=action_id,
+                                    error=str(retry_exc),
+                                    strategy=retry_action.get("_retry_strategy"),
+                                )
+                                if progress_callback:
+                                    progress_callback(f"Click preflight retry failed: {retry_exc}")
+                        if not hit_issue:
+                            click_preflight_replans = 0
+                            _emit_state_transition(
+                                artifact_callback,
+                                progress_callback,
+                                state="preflight",
+                                round_index=round_index,
+                                status="ok",
+                                summary=f"Retry accepted: {hit_summary}",
+                                score=hit_score,
+                                action=action,
+                                action_id=action_id,
+                            )
                         else:
-                            final_status = "continue"
-                            final_summary = "Click preflight rejected the target; replanning from a fresh screenshot."
-                        _emit_state_transition(
-                            artifact_callback,
-                            progress_callback,
-                            state=next_state,
-                            round_index=round_index,
-                            status="pending" if next_state == "manual_confirm" else "ok",
-                            summary=final_summary,
-                            failure=last_failure,
-                            action_id=action_id,
-                        )
-                        if next_state == "manual_confirm":
-                            terminal_state_emitted = True
-                        break
+                            click_preflight_replans += 1
+                            last_failure = classify_visual_failure(
+                                "click_preflight",
+                                hit_issue,
+                                status="need_user" if click_preflight_replans >= 2 else "continue",
+                                retry_count=click_preflight_replans,
+                                context={
+                                    "action": action,
+                                    "hit_test": hit_test,
+                                    "screenshot": screenshot,
+                                    "score": hit_score,
+                                    "page_state_before": screenshot.get("page_state") if isinstance(screenshot.get("page_state"), dict) else {},
+                                    "page_state_after": hit_test.get("page_state") if isinstance(hit_test.get("page_state"), dict) else {},
+                                },
+                            )
+                            failure_events.append(last_failure)
+                            trace = (
+                                f"Skipped visual click after preflight: issue={hit_issue}; score={hit_score:.2f}; "
+                                f"target={target_description or '-'}; hit={hit_summary}"
+                            )
+                            history.append(trace)
+                            next_state = "manual_confirm" if click_preflight_replans >= 2 else "continue"
+                            _emit_state_transition(
+                                artifact_callback,
+                                progress_callback,
+                                state="preflight",
+                                round_index=round_index,
+                                status="rejected",
+                                summary=hit_issue,
+                                score=hit_score,
+                                failure=last_failure,
+                                action=action,
+                                action_id=action_id,
+                            )
+                            if progress_callback:
+                                progress_callback(trace)
+                            _emit_artifact(
+                                artifact_callback,
+                                event="failure",
+                                round_index=round_index,
+                                failure=last_failure,
+                                action=action,
+                                action_id=action_id,
+                                trace=trace,
+                            )
+                            if click_preflight_replans >= 2:
+                                final_status = "need_user"
+                                final_summary = "Click preflight could not confirm a safe target."
+                            else:
+                                final_status = "continue"
+                                final_summary = "Click preflight rejected the target; replanning from a fresh screenshot."
+                            _emit_state_transition(
+                                artifact_callback,
+                                progress_callback,
+                                state=next_state,
+                                round_index=round_index,
+                                status="pending" if next_state == "manual_confirm" else "ok",
+                                summary=final_summary,
+                                failure=last_failure,
+                                action_id=action_id,
+                            )
+                            if next_state == "manual_confirm":
+                                terminal_state_emitted = True
+                            break
                     click_preflight_replans = 0
                     _emit_state_transition(
                         artifact_callback,
@@ -927,6 +1080,8 @@ def run_local_browser_visual_operation(
                 f"Action: {action_name}; confidence={confidence:.2f}; target={target_description or '-'}; "
                 f"expected={expected_change or '-'}; reason={reason or '-'}; ok={bool(result.get('ok'))}"
             )
+            if action.get("_preflight_retry"):
+                trace += f"; retry_strategy={action.get('_retry_strategy') or '-'}"
             if backend:
                 trace += f"; backend={backend}"
             history.append(trace)
